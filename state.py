@@ -1,0 +1,52 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+class BotState:
+    def __init__(self, state_dir: str = "state") -> None:
+        self.path = Path(state_dir) / "bot_state.json"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.data: dict[str, Any] = {
+            "cooldowns": {},
+            "highest_prices": {},
+            "entry_prices": {},
+        }
+        self.load()
+
+    def load(self) -> None:
+        if self.path.exists():
+            with self.path.open() as handle:
+                loaded = json.load(handle)
+            self.data.update(loaded)
+
+    def save(self) -> None:
+        with self.path.open("w") as handle:
+            json.dump(self.data, handle, indent=2, sort_keys=True)
+
+    def is_on_cooldown(self, symbol: str, cooldown_seconds: int) -> bool:
+        sold_at = self.data["cooldowns"].get(symbol)
+        if not sold_at:
+            return False
+        elapsed = datetime.now(timezone.utc).timestamp() - float(sold_at)
+        return elapsed < cooldown_seconds
+
+    def mark_sold(self, symbol: str) -> None:
+        self.data["cooldowns"][symbol] = datetime.now(timezone.utc).timestamp()
+        self.data["highest_prices"].pop(symbol, None)
+        self.data["entry_prices"].pop(symbol, None)
+        self.save()
+
+    def set_entry(self, symbol: str, price: float) -> None:
+        self.data["entry_prices"][symbol] = price
+        self.data["highest_prices"][symbol] = price
+        self.save()
+
+    def update_highest(self, symbol: str, price: float) -> float:
+        highest = max(float(self.data["highest_prices"].get(symbol, price)), price)
+        self.data["highest_prices"][symbol] = highest
+        self.save()
+        return highest
