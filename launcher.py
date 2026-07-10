@@ -3,15 +3,23 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
+from pathlib import Path
+
+
+BASE_DIR = Path(__file__).resolve().parent
+CONFIGURATION_ERROR_EXIT_CODE = 78
 
 
 def main() -> None:
     while True:
-        print("Launching MomentumMaster...")
-        process = subprocess.Popen([sys.executable, "main.py"])
+        print("Launching MomentumMaster...", flush=True)
+        process = subprocess.Popen([sys.executable, str(BASE_DIR / "main.py")], cwd=BASE_DIR)
         exit_code = process.wait()
         if exit_code == 0:
             print("MomentumMaster exited cleanly.")
+            break
+        if exit_code == CONFIGURATION_ERROR_EXIT_CODE:
+            print("MomentumMaster stopped because configuration is incomplete. Fix .env and run again.")
             break
         print(f"MomentumMaster crashed with exit code {exit_code}. Restarting in 30 seconds.")
         time.sleep(30)

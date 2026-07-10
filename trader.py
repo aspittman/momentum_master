@@ -15,11 +15,24 @@ bot_state = BotState(settings.state_dir)
 trade_logger = TradeLogger(settings.log_dir)
 
 
+class ConfigurationError(RuntimeError):
+    """Raised when required runtime configuration is missing or invalid."""
+
+
 def get_trading_client() -> TradingClient:
     global trading_client
     if trading_client is None:
-        if not settings.alpaca_api_key or not settings.alpaca_secret_key:
-            raise RuntimeError("Set ALPACA_API_KEY and ALPACA_SECRET_KEY in .env before live or paper trading.")
+        missing = [
+            name
+            for name, value in {
+                "ALPACA_API_KEY": settings.alpaca_api_key,
+                "ALPACA_SECRET_KEY": settings.alpaca_secret_key,
+            }.items()
+            if not value
+        ]
+        if missing:
+            names = " and ".join(missing)
+            raise ConfigurationError(f"Set {names} in {settings.env_file} before live or paper trading.")
         trading_client = TradingClient(
             settings.alpaca_api_key,
             settings.alpaca_secret_key,

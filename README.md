@@ -8,7 +8,6 @@ MomentumMaster is a stock-only short-term momentum trading bot. It ranks liquid 
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
 ```
 
 Edit `.env` with Alpaca credentials. Paper trading is enabled by default.

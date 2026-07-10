@@ -131,6 +131,13 @@ def evaluate_prepared_symbol(symbol: str, frame: pd.DataFrame, settings) -> Cand
 
 def scan_universe(universe: list[str], settings) -> list[Candidate]:
     benchmark = download_symbol(settings.benchmark_symbol, settings.data_period, settings.data_interval)
+    if benchmark.empty or "Close" not in benchmark.columns:
+        print(
+            f"Unable to download benchmark data for {settings.benchmark_symbol}; "
+            "skipping this scan cycle."
+        )
+        return []
+
     candidates: list[Candidate] = []
     for symbol in universe:
         print(f"Scanning {symbol}...")

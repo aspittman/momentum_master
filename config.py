@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 from universe import UNIVERSE
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
+
+load_dotenv(BASE_DIR / ".env")
+
+
+def _str(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -34,15 +41,17 @@ def _symbols(name: str, default: list[str]) -> list[str]:
 
 @dataclass(frozen=True)
 class Settings:
-    alpaca_api_key: str = os.getenv("ALPACA_API_KEY", "")
-    alpaca_secret_key: str = os.getenv("ALPACA_SECRET_KEY", "")
+    env_file: Path = BASE_DIR / ".env"
+
+    alpaca_api_key: str = _str("ALPACA_API_KEY")
+    alpaca_secret_key: str = _str("ALPACA_SECRET_KEY")
     alpaca_paper: bool = _bool("ALPACA_PAPER", True)
 
     universe: list[str] = field(default_factory=lambda: _symbols("UNIVERSE", UNIVERSE))
-    benchmark_symbol: str = os.getenv("BENCHMARK_SYMBOL", "SPY")
+    benchmark_symbol: str = _str("BENCHMARK_SYMBOL", "SPY")
     scan_interval_seconds: int = _int("SCAN_INTERVAL_SECONDS", 300)
-    data_period: str = os.getenv("DATA_PERIOD", "1y")
-    data_interval: str = os.getenv("DATA_INTERVAL", "1d")
+    data_period: str = _str("DATA_PERIOD", "1y")
+    data_interval: str = _str("DATA_INTERVAL", "1d")
 
     max_positions: int = _int("MAX_POSITIONS", 5)
     max_total_capital: float = _float("MAX_TOTAL_CAPITAL", 2500)
@@ -72,8 +81,8 @@ class Settings:
     bollinger_std: float = _float("BOLLINGER_STD", 2.0)
     bollinger_max_extension: float = _float("BOLLINGER_MAX_EXTENSION", 0.03)
 
-    state_dir: str = os.getenv("STATE_DIR", "state")
-    log_dir: str = os.getenv("LOG_DIR", "logs")
+    state_dir: str = _str("STATE_DIR", "state")
+    log_dir: str = _str("LOG_DIR", "logs")
 
 
 settings = Settings()

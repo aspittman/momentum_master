@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import time
 import traceback
 
@@ -11,6 +12,7 @@ from trader import (
     already_holding,
     bot_state,
     buy_candidate,
+    ConfigurationError,
     get_open_positions_count,
     get_total_market_value,
     get_trading_client,
@@ -18,6 +20,9 @@ from trader import (
     print_account_info,
     print_position,
 )
+
+
+CONFIGURATION_ERROR_EXIT_CODE = 78
 
 
 def wait_for_market_open() -> None:
@@ -123,6 +128,9 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             print("\nBot stopped manually.")
             break
+        except ConfigurationError as exc:
+            print(f"\nCONFIGURATION ERROR: {exc}")
+            sys.exit(CONFIGURATION_ERROR_EXIT_CODE)
         except Exception as exc:
             print("\nBOT CRASHED - restarting soon...")
             print(f"Crash reason: {exc}")

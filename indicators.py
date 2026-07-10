@@ -56,6 +56,11 @@ def add_indicators(
 
 def add_relative_strength(data: pd.DataFrame, benchmark: pd.DataFrame) -> pd.DataFrame:
     frame = data.copy()
+    if "Close" not in benchmark.columns:
+        # A provider outage can return an empty frame with no columns.  Leave
+        # relative strength unavailable so the caller can safely reject it.
+        frame["relative_strength"] = float("nan")
+        return frame
     aligned_benchmark = benchmark["Close"].reindex(frame.index).ffill()
     symbol_return = frame["Close"].pct_change(20)
     benchmark_return = aligned_benchmark.pct_change(20)
