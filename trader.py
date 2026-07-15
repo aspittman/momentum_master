@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, TimeInForce
@@ -73,7 +75,8 @@ def place_market_order(
     reason: str = "",
     score: float | str = "",
     price: float | str = "",
-) -> None:
+    log_fields: dict | None = None,
+):
     order_side = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
     request = MarketOrderRequest(
         symbol=symbol,
@@ -83,58 +86,148 @@ def place_market_order(
         time_in_force=TimeInForce.DAY,
     )
     order = get_trading_client().submit_order(request)
+    # Market orders are often filled moments after acceptance. Briefly reconcile so
+    # fractional quantity and fill price are captured when Alpaca has them.
+    for _ in range(3):
+        if getattr(order, "filled_at", None) or getattr(order, "filled_avg_price", None):
+            break
+        time.sleep(0.5)
+        try:
+            order = get_trading_client().get_order_by_id(order.id)
+        except Exception:
+            break
+    filled_qty = getattr(order, "filled_qty", None)
+    filled_price = getattr(order, "filled_avg_price", None)
+    fields = dict(log_fields or {})
+    if filled_price:
+        fields["entry_price" if side.lower() == "buy" else "exit_price"] = filled_price
+        if side.lower() == "sell" and fields.get("entry_price"):
+            actual_qty = float(filled_qty or qty or 0)
+            entry = float(fields["entry_price"])
+            exit_price = float(filled_price)
+            fields["realized_pl"] = actual_qty * (exit_price - entry)
+            fields["realized_pl_percent"] = exit_price / entry - 1
     trade_logger.log(
         symbol=symbol,
         side=side.lower(),
-        qty=qty or "",
+        qty=filled_qty or qty or "",
         notional=notional or "",
-        reason=reason,
         order_id=getattr(order, "id", ""),
-        score=score,
-        price=price,
+        **fields,
     )
     print(f"Placed {side.upper()} market order for {symbol}")
+    return order
 
 
-def buy_candidate(candidate) -> None:
+def has_open_order(symbol: str, side: str | None = None) -> bool:
+    try:
+        for order in get_trading_client().get_orders():
+            order_symbol = str(getattr(order, "symbol", "")).upper()
+            order_side = str(getattr(order, "side", "")).lower()
+            if order_symbol == symbol.upper() and (side is None or side.lower() in order_side):
+                return True
+    except Exception as exc:
+        print(f"Unable to verify open orders for {symbol}: {exc}; protecting against a duplicate order.")
+        return True
+    return False
+
+
+def mark_recently_sold(symbol: str) -> None:
+    bot_state.mark_sold(symbol)
+
+
+def is_in_cooldown(symbol: str) -> bool:
+    return bot_state.is_on_cooldown(symbol, settings.cooldown_seconds)
+
+
+def buy_candidate(candidate) -> bool:
     if already_holding(candidate.symbol):
         print(f"Already holding {candidate.symbol}. Skipping.")
-        return
-    place_market_order(
+        return False
+    if has_open_order(candidate.symbol):
+        print(f"Open order exists for {candidate.symbol}. Skipping.")
+        return False
+    order = place_market_order(
         candidate.symbol,
         "buy",
         notional=settings.dollars_per_trade,
         reason="momentum_entry",
         score=candidate.score,
-        price=candidate.price,
+        log_fields={
+            "entry_price": candidate.price,
+            "entry_score": candidate.score, "entry_reason": candidate.entry_reason,
+            "atr_at_entry": candidate.atr, "ema20": candidate.ema_fast,
+            "ema50": candidate.ema_slow, "macd": candidate.macd,
+            "macd_signal": candidate.macd_signal, "macd_histogram": candidate.macd_hist,
+            "relative_strength_score": candidate.relative_strength, "volume_ratio": candidate.volume_ratio,
+        },
     )
-    bot_state.set_entry(candidate.symbol, candidate.price)
+    fill_price = float(getattr(order, "filled_avg_price", None) or candidate.price)
+    metadata = candidate.as_dict()
+    metadata["price"] = fill_price
+    bot_state.set_entry(candidate.symbol, fill_price, metadata)
+    return True
 
 
-def sell_position(symbol: str, qty: float, reason: str, price: float | None = None) -> None:
-    place_market_order(symbol, "sell", qty=qty, reason=reason, price=price or "")
-    bot_state.mark_sold(symbol)
+def sell_position(symbol: str, qty: float, reason: str, price: float, indicators: dict) -> bool:
+    if has_open_order(symbol, "sell"):
+        print(f"Open sell order exists for {symbol}. Skipping duplicate exit.")
+        return False
+    entry = bot_state.entry_metadata(symbol)
+    entry_price = float(entry.get("price", indicators.get("entry_price", price)))
+    pnl = qty * (price - entry_price)
+    placed = place_market_order(symbol, "sell", qty=qty, reason=reason, log_fields={
+        "entry_price": entry_price, "exit_price": price,
+        "realized_pl": pnl, "realized_pl_percent": (price / entry_price - 1) if entry_price else "",
+        "entry_score": entry.get("score", ""), "entry_reason": entry.get("entry_reason", "momentum_entry"),
+        "exit_reason": reason, "atr_at_entry": entry.get("atr", ""), "atr_at_exit": indicators.get("atr", ""),
+        "ema20": indicators.get("ema_fast", ""), "ema50": indicators.get("ema_slow", ""),
+        "macd": indicators.get("macd", ""), "macd_signal": indicators.get("macd_signal", ""),
+        "macd_histogram": indicators.get("macd_hist", ""),
+        "relative_strength_score": entry.get("relative_strength", ""), "volume_ratio": entry.get("volume_ratio", ""),
+        "holding_duration": _holding_duration(entry.get("timestamp")),
+    })
+    if placed:
+        mark_recently_sold(symbol)
+        return True
+    return False
 
 
-def manage_position(symbol: str, latest_price: float, latest_atr: float) -> bool:
+def _holding_duration(timestamp) -> str:
+    if not timestamp:
+        return ""
+    from datetime import datetime, timezone
+    try:
+        entered = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        return str(datetime.now(timezone.utc) - entered)
+    except (TypeError, ValueError):
+        return ""
+
+
+def manage_position(symbol: str, frame) -> bool:
+    from signals import momentum_exit_decision
     position = get_position(symbol)
     if position is None:
         return False
 
     qty = float(position.qty)
     entry_price = float(position.avg_entry_price)
-    highest = bot_state.update_highest(symbol, latest_price)
-    atr_stop = highest - (settings.atr_multiplier * latest_atr)
-    backup_stop = entry_price * (1 - settings.backup_stop_loss_percent)
-    stop_price = max(atr_stop, backup_stop)
+    latest = frame.iloc[-1]
+    latest_price = float(latest["Close"])
+    highest = bot_state.update_highest(symbol, max(entry_price, latest_price))
+    proposed = highest - settings.atr_multiplier * float(latest["atr"])
+    atr_stop = bot_state.update_trailing_stop(symbol, proposed)
+    decision = momentum_exit_decision(frame, entry_price=entry_price, highest_price=highest,
+                                      settings=settings, atr_stop_floor=atr_stop,
+                                      completed_bar_offset=1 if settings.data_interval.endswith("d") else 0)
 
     print(
         f"{symbol}: price={latest_price:.2f}, highest={highest:.2f}, "
-        f"ATR stop={atr_stop:.2f}, backup stop={backup_stop:.2f}"
+        f"ATR stop={atr_stop:.2f}, hard stop={entry_price * (1-settings.hard_stop_percent):.2f}"
     )
-    if latest_price <= stop_price:
-        sell_position(symbol, qty, "atr_trailing_stop", latest_price)
-        return True
+    reason = decision.reason if decision else ""
+    if reason:
+        return sell_position(symbol, qty, reason, latest_price, latest.to_dict())
     return False
 
 

@@ -13,9 +13,10 @@ def load_trades(path: str = "logs/trades.csv") -> pd.DataFrame:
 
 
 def summarize_trades(trades: pd.DataFrame) -> dict[str, float | int | str]:
-    if trades.empty or "pnl" not in trades:
+    pnl_column = "realized_pl" if "realized_pl" in trades else "pnl"
+    if trades.empty or pnl_column not in trades:
         return {}
-    pnl = pd.to_numeric(trades["pnl"], errors="coerce").dropna()
+    pnl = pd.to_numeric(trades[pnl_column], errors="coerce").dropna()
     if pnl.empty:
         return {}
     wins = pnl[pnl > 0]
@@ -34,7 +35,8 @@ def summarize_trades(trades: pd.DataFrame) -> dict[str, float | int | str]:
 
 
 def equity_curve_from_pnl(trades: pd.DataFrame, starting_equity: float = 0.0) -> pd.Series:
-    if trades.empty or "pnl" not in trades:
+    pnl_column = "realized_pl" if "realized_pl" in trades else "pnl"
+    if trades.empty or pnl_column not in trades:
         return pd.Series(dtype=float)
-    pnl = pd.to_numeric(trades["pnl"], errors="coerce").fillna(0)
+    pnl = pd.to_numeric(trades[pnl_column], errors="coerce").fillna(0)
     return starting_equity + pnl.cumsum()

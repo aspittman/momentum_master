@@ -14,6 +14,8 @@ class BotState:
             "cooldowns": {},
             "highest_prices": {},
             "entry_prices": {},
+            "trailing_stops": {},
+            "entries": {},
         }
         self.load()
 
@@ -38,11 +40,16 @@ class BotState:
         self.data["cooldowns"][symbol] = datetime.now(timezone.utc).timestamp()
         self.data["highest_prices"].pop(symbol, None)
         self.data["entry_prices"].pop(symbol, None)
+        self.data["trailing_stops"].pop(symbol, None)
+        self.data["entries"].pop(symbol, None)
         self.save()
 
-    def set_entry(self, symbol: str, price: float) -> None:
+    def set_entry(self, symbol: str, price: float, metadata: dict[str, Any] | None = None) -> None:
         self.data["entry_prices"][symbol] = price
         self.data["highest_prices"][symbol] = price
+        entry = dict(metadata or {})
+        entry.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
+        self.data["entries"][symbol] = entry
         self.save()
 
     def update_highest(self, symbol: str, price: float) -> float:
@@ -50,3 +57,13 @@ class BotState:
         self.data["highest_prices"][symbol] = highest
         self.save()
         return highest
+
+    def update_trailing_stop(self, symbol: str, proposed: float) -> float:
+        previous = float(self.data["trailing_stops"].get(symbol, proposed))
+        stop = max(previous, proposed)
+        self.data["trailing_stops"][symbol] = stop
+        self.save()
+        return stop
+
+    def entry_metadata(self, symbol: str) -> dict[str, Any]:
+        return dict(self.data["entries"].get(symbol, {}))

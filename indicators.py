@@ -55,6 +55,12 @@ def add_indicators(
 
 
 def add_relative_strength(data: pd.DataFrame, benchmark: pd.DataFrame) -> pd.DataFrame:
+    return add_relative_strength_with_lookback(data, benchmark, 20)
+
+
+def add_relative_strength_with_lookback(
+    data: pd.DataFrame, benchmark: pd.DataFrame, lookback: int
+) -> pd.DataFrame:
     frame = data.copy()
     if "Close" not in benchmark.columns:
         # A provider outage can return an empty frame with no columns.  Leave
@@ -62,7 +68,7 @@ def add_relative_strength(data: pd.DataFrame, benchmark: pd.DataFrame) -> pd.Dat
         frame["relative_strength"] = float("nan")
         return frame
     aligned_benchmark = benchmark["Close"].reindex(frame.index).ffill()
-    symbol_return = frame["Close"].pct_change(20)
-    benchmark_return = aligned_benchmark.pct_change(20)
+    symbol_return = frame["Close"].pct_change(lookback)
+    benchmark_return = aligned_benchmark.pct_change(lookback)
     frame["relative_strength"] = symbol_return - benchmark_return
     return frame

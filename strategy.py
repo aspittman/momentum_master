@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from indicators import add_indicators, add_relative_strength
+from indicators import add_indicators, add_relative_strength_with_lookback
 from market_data import download_symbol
 
 
@@ -19,6 +19,9 @@ class Candidate:
     macd_hist: float
     ema_fast: float
     ema_slow: float
+    macd: float
+    macd_signal: float
+    entry_reason: str = "momentum_entry"
 
     def as_dict(self) -> dict[str, float | str]:
         return self.__dict__.copy()
@@ -56,8 +59,10 @@ def evaluate_symbol(symbol: str, data: pd.DataFrame, benchmark: pd.DataFrame, se
         bollinger_length=settings.bollinger_length,
         bollinger_std=settings.bollinger_std,
     )
-    frame = add_relative_strength(frame, benchmark)
-    return evaluate_prepared_symbol(symbol, frame, settings)
+    frame = add_relative_strength_with_lookback(frame, benchmark, settings.relative_strength_lookback)
+    # The bot scans while the market is open; the final daily candle is incomplete.
+    completed = frame.iloc[:-1] if settings.data_interval.endswith("d") else frame
+    return evaluate_prepared_symbol(symbol, completed, settings)
 
 
 def evaluate_prepared_symbol(symbol: str, frame: pd.DataFrame, settings) -> Candidate | None:
@@ -92,29 +97,46 @@ def evaluate_prepared_symbol(symbol: str, frame: pd.DataFrame, settings) -> Cand
     price = float(latest["Close"])
     ema_fast = float(latest["ema_fast"])
     ema_slow = float(latest["ema_slow"])
-    macd_crossed = previous["macd"] <= previous["macd_signal"] and latest["macd"] > latest["macd_signal"]
+    ema_rising = latest["ema_fast"] > previous["ema_fast"]
+    macd_bullish = latest["macd"] > latest["macd_signal"]
     hist_increasing = latest["macd_hist"] > 0 and latest["macd_hist"] > previous["macd_hist"]
     volume_ratio = float(latest["Volume"] / latest["avg_volume"]) if latest["avg_volume"] else 0.0
     relative_strength = float(latest["relative_strength"])
 
-    if not (price > ema_fast and ema_fast > ema_slow and macd_crossed and hist_increasing):
+    if not (price > ema_fast and ema_fast > ema_slow and ema_rising and macd_bullish and hist_increasing):
         return None
     if settings.require_relative_strength and relative_strength <= 0:
         return None
-    if settings.require_volume_confirmation and volume_ratio <= 1:
+    if settings.require_volume_confirmation and volume_ratio < settings.min_volume_ratio:
         return None
     if settings.use_bollinger_confirmation:
         upper = float(latest["bb_upper"])
         if price > upper * (1 + settings.bollinger_max_extension):
             return None
 
-    trend_score = ((ema_fast - ema_slow) / ema_slow) * 100
-    macd_score = float(latest["macd_hist"] - previous["macd_hist"]) * 10
-    rs_score = relative_strength * 100
-    volume_score = min(volume_ratio - 1, 3) * 5
-    ema_distance_score = min(((price - ema_fast) / ema_fast) * 100, 10)
-    acceleration_score = (float(latest["momentum_5"]) - float(latest["momentum_10"])) * 100
-    score = trend_score + macd_score + rs_score + volume_score + ema_distance_score + acceleration_score
+    hist_scale = abs(float(latest["macd"])) or price * 0.001
+    rs_component = relative_strength
+    hist_component = float(latest["macd_hist"]) / hist_scale
+    acceleration_component = float(latest["macd_hist"] - previous["macd_hist"]) / hist_scale
+    ema_distance = (price - ema_fast) / ema_fast
+    ema_slope = (ema_fast - float(previous["ema_fast"])) / float(previous["ema_fast"])
+    recent_momentum = float(latest["momentum_5"])
+    breakout = 0.0
+    if settings.enable_breakout_score and len(frame) > settings.breakout_lookback:
+        prior_high = float(frame["High"].iloc[-settings.breakout_lookback - 1:-1].max())
+        breakout = max(0.0, (price - prior_high) / prior_high)
+    score = 100 * (
+        settings.score_weight_relative_strength * rs_component
+        + settings.score_weight_macd_strength * hist_component
+        + settings.score_weight_macd_acceleration * acceleration_component
+        + settings.score_weight_ema_distance * ema_distance
+        + settings.score_weight_ema_slope * ema_slope
+        + settings.score_weight_volume * max(0.0, volume_ratio - 1.0)
+        + settings.score_weight_price_momentum * recent_momentum
+        + settings.score_weight_breakout * breakout
+    )
+    if score < settings.minimum_momentum_score:
+        return None
 
     return Candidate(
         symbol=symbol,
@@ -126,6 +148,8 @@ def evaluate_prepared_symbol(symbol: str, frame: pd.DataFrame, settings) -> Cand
         macd_hist=float(latest["macd_hist"]),
         ema_fast=ema_fast,
         ema_slow=ema_slow,
+        macd=float(latest["macd"]),
+        macd_signal=float(latest["macd_signal"]),
     )
 
 

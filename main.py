@@ -10,12 +10,12 @@ from market_data import download_symbol
 from strategy import market_regime_allows_buys, scan_universe
 from trader import (
     already_holding,
-    bot_state,
     buy_candidate,
     ConfigurationError,
     get_open_positions_count,
     get_total_market_value,
     get_trading_client,
+    is_in_cooldown,
     manage_position,
     print_account_info,
     print_position,
@@ -34,7 +34,7 @@ def wait_for_market_open() -> None:
         time.sleep(60)
 
 
-def latest_atr_and_price(symbol: str) -> tuple[float, float] | None:
+def latest_signal_frame(symbol: str):
     data = download_symbol(symbol, settings.data_period, settings.data_interval)
     if data.empty:
         return None
@@ -50,21 +50,22 @@ def latest_atr_and_price(symbol: str) -> tuple[float, float] | None:
         bollinger_length=settings.bollinger_length,
         bollinger_std=settings.bollinger_std,
     )
-    latest = frame.iloc[-1]
-    return float(latest["Close"]), float(latest["atr"])
+    return frame
 
 
 def manage_open_positions() -> None:
     print("\n=== MANAGING OPEN POSITIONS ===")
-    for symbol in settings.universe:
+    sold_this_cycle: set[str] = set()
+    symbols = [str(position.symbol) for position in get_trading_client().get_all_positions()]
+    for symbol in symbols:
         try:
             if not already_holding(symbol):
                 continue
-            latest = latest_atr_and_price(symbol)
-            if latest is None:
+            frame = latest_signal_frame(symbol)
+            if frame is None or frame.empty:
                 continue
-            price, atr = latest
-            manage_position(symbol, price, atr)
+            if symbol not in sold_this_cycle and manage_position(symbol, frame):
+                sold_this_cycle.add(symbol)
             print_position(symbol)
         except Exception as exc:
             print(f"Error managing {symbol}: {exc}")
@@ -96,20 +97,24 @@ def run_cycle() -> None:
 
     open_positions = get_open_positions_count()
     total_capital_used = get_total_market_value()
+    new_buys = 0
     for candidate in candidates[: settings.max_candidates_per_cycle]:
+        if new_buys >= settings.max_new_buys_per_cycle:
+            break
         if open_positions >= settings.max_positions:
             print("Max positions reached.")
             break
         if total_capital_used + settings.dollars_per_trade > settings.max_total_capital:
             print("Max total capital reached.")
             break
-        if bot_state.is_on_cooldown(candidate.symbol, settings.cooldown_seconds):
+        if is_in_cooldown(candidate.symbol):
             print(f"{candidate.symbol} is on cooldown. Skipping.")
             continue
-        buy_candidate(candidate)
+        if buy_candidate(candidate):
+            new_buys += 1
+            open_positions += 1
+            total_capital_used += settings.dollars_per_trade
         time.sleep(2)
-        open_positions = get_open_positions_count()
-        total_capital_used = get_total_market_value()
     print_account_info()
 
 
