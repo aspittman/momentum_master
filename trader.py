@@ -4,8 +4,8 @@ import time
 
 from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, TimeInForce
-from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.enums import AssetClass, OrderSide, OrderType, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest, ReplaceOrderRequest, StopOrderRequest
 
 from config import settings
 from state import BotState
@@ -43,16 +43,27 @@ def get_trading_client() -> TradingClient:
     return trading_client
 
 
+def is_stock_position(position) -> bool:
+    asset_class = getattr(position, "asset_class", None)
+    value = str(getattr(asset_class, "value", asset_class)).lower()
+    return value == AssetClass.US_EQUITY.value
+
+
+def get_stock_positions() -> list:
+    return [position for position in get_trading_client().get_all_positions()
+            if is_stock_position(position)]
+
+
 def get_total_market_value() -> float:
     try:
-        return sum(float(position.market_value) for position in get_trading_client().get_all_positions())
+        return sum(abs(float(position.market_value)) for position in get_stock_positions())
     except Exception as exc:
         print(f"Error getting total market value: {exc}")
         return 0.0
 
 
 def get_open_positions_count() -> int:
-    return len(get_trading_client().get_all_positions())
+    return len(get_stock_positions())
 
 
 def get_position(symbol: str):
@@ -86,9 +97,9 @@ def place_market_order(
         time_in_force=TimeInForce.DAY,
     )
     order = get_trading_client().submit_order(request)
-    # Market orders are often filled moments after acceptance. Briefly reconcile so
-    # fractional quantity and fill price are captured when Alpaca has them.
-    for _ in range(3):
+    # Wait briefly for a complete fill. Accepted/unfilled orders are recovered by
+    # startup reconciliation instead of being written as zero-quantity trades.
+    for _ in range(10):
         if getattr(order, "filled_at", None) or getattr(order, "filled_avg_price", None):
             break
         time.sleep(0.5)
@@ -107,15 +118,15 @@ def place_market_order(
             exit_price = float(filled_price)
             fields["realized_pl"] = actual_qty * (exit_price - entry)
             fields["realized_pl_percent"] = exit_price / entry - 1
-    trade_logger.log(
-        symbol=symbol,
-        side=side.lower(),
-        qty=filled_qty or qty or "",
-        notional=notional or "",
-        order_id=getattr(order, "id", ""),
-        **fields,
-    )
-    print(f"Placed {side.upper()} market order for {symbol}")
+    if getattr(order, "filled_at", None) and filled_qty and filled_price:
+        trade_logger.log(
+            symbol=symbol, side=side.lower(), qty=filled_qty,
+            notional=float(filled_qty) * float(filled_price),
+            order_id=getattr(order, "id", ""), **fields,
+        )
+        print(f"Filled {side.upper()} market order for {symbol}")
+    else:
+        print(f"Submitted {side.upper()} market order for {symbol}; fill is still pending.")
     return order
 
 
@@ -130,6 +141,110 @@ def has_open_order(symbol: str, side: str | None = None) -> bool:
         print(f"Unable to verify open orders for {symbol}: {exc}; protecting against a duplicate order.")
         return True
     return False
+
+
+def has_pending_exit(symbol: str) -> bool:
+    pending = bot_state.pending_exit(symbol)
+    if not pending:
+        return False
+    order_id = pending.get("order_id")
+    if not order_id:
+        return True
+    try:
+        order = get_trading_client().get_order_by_id(order_id)
+        status = str(getattr(getattr(order, "status", ""), "value",
+                             getattr(order, "status", ""))).lower()
+        if status in {"canceled", "expired", "rejected"}:
+            bot_state.clear_pending_exit(symbol)
+            return False
+    except Exception as exc:
+        print(f"Unable to verify pending exit for {symbol}: {exc}; blocking a duplicate exit.")
+    return True
+
+
+def reconcile_pending_exits(open_symbols: set[str]) -> None:
+    tracked = set(bot_state.data.get("pending_exits", {})) | set(
+        bot_state.data.get("protective_stops", {})
+    )
+    for symbol in tracked:
+        if symbol not in open_symbols:
+            record = (bot_state.pending_exit(symbol) or bot_state.protective_stop(symbol))
+            order_id = record.get("order_id")
+            if order_id:
+                try:
+                    from paper_trades import reconcile_filled_orders
+                    order = get_trading_client().get_order_by_id(order_id)
+                    reconcile_filled_orders([order], trade_logger)
+                    rows = trade_logger.read()
+                    for row in rows:
+                        if str(row.get("order_id", "")) == str(order_id):
+                            row["exit_reason"] = record.get("reason", "")
+                    trade_logger.replace(rows)
+                except Exception as exc:
+                    print(f"Unable to reconcile completed exit for {symbol}: {exc}")
+            mark_recently_sold(symbol)
+
+
+def ensure_protective_stop(symbol: str, qty: float, stop_price: float) -> None:
+    """Keep one session-long sell stop active, ratcheting upward but never down."""
+    stop_price = round(float(stop_price), 2)
+    existing = bot_state.protective_stop(symbol)
+    if existing:
+        order_id = existing.get("order_id")
+        try:
+            order = get_trading_client().get_order_by_id(order_id)
+            status = str(getattr(getattr(order, "status", ""), "value",
+                                 getattr(order, "status", ""))).lower()
+            if status not in {"canceled", "expired", "rejected", "filled"}:
+                if stop_price > float(existing.get("stop_price", 0)) + 0.009:
+                    replacement = get_trading_client().replace_order_by_id(
+                        order_id, ReplaceOrderRequest(stop_price=stop_price)
+                    )
+                    bot_state.set_protective_stop(symbol, getattr(replacement, "id", order_id), stop_price)
+                return
+            bot_state.clear_protective_stop(symbol)
+        except Exception as exc:
+            print(f"Unable to verify protective stop for {symbol}: {exc}; not submitting a duplicate.")
+            return
+    order = get_trading_client().submit_order(StopOrderRequest(
+        symbol=symbol, qty=qty, side=OrderSide.SELL, type=OrderType.STOP,
+        time_in_force=TimeInForce.DAY, stop_price=stop_price,
+    ))
+    bot_state.set_protective_stop(symbol, getattr(order, "id", ""), stop_price)
+    print(f"Protective stop active for {symbol} at ${stop_price:.2f}")
+
+
+def cancel_protective_stop(symbol: str) -> bool:
+    """Cancel the safety stop before another sell; fail closed on uncertainty."""
+    existing = bot_state.protective_stop(symbol)
+    if not existing:
+        return True
+    order_id = existing.get("order_id")
+    try:
+        order = get_trading_client().get_order_by_id(order_id)
+        status = str(getattr(getattr(order, "status", ""), "value",
+                             getattr(order, "status", ""))).lower()
+        if status == "filled":
+            return False
+        if status not in {"canceled", "expired", "rejected"}:
+            get_trading_client().cancel_order_by_id(order_id)
+            for _ in range(10):
+                time.sleep(0.2)
+                order = get_trading_client().get_order_by_id(order_id)
+                status = str(getattr(getattr(order, "status", ""), "value",
+                                     getattr(order, "status", ""))).lower()
+                if status in {"canceled", "expired", "rejected"}:
+                    break
+                if status == "filled":
+                    return False
+            else:
+                print(f"Protective stop cancellation for {symbol} is still pending; blocking another sell.")
+                return False
+        bot_state.clear_protective_stop(symbol)
+        return True
+    except Exception as exc:
+        print(f"Unable to cancel protective stop for {symbol}: {exc}; blocking another sell.")
+        return False
 
 
 def mark_recently_sold(symbol: str) -> None:
@@ -162,14 +277,25 @@ def buy_candidate(candidate) -> bool:
             "relative_strength_score": candidate.relative_strength, "volume_ratio": candidate.volume_ratio,
         },
     )
-    fill_price = float(getattr(order, "filled_avg_price", None) or candidate.price)
-    metadata = candidate.as_dict()
-    metadata["price"] = fill_price
-    bot_state.set_entry(candidate.symbol, fill_price, metadata)
+    if getattr(order, "filled_at", None):
+        fill_price = float(getattr(order, "filled_avg_price", None) or candidate.price)
+        metadata = candidate.as_dict()
+        metadata["price"] = fill_price
+        bot_state.set_entry(candidate.symbol, fill_price, metadata)
+        ensure_protective_stop(
+            candidate.symbol, float(getattr(order, "filled_qty", 0)),
+            max(fill_price * (1 - settings.hard_stop_percent),
+                fill_price - settings.atr_multiplier * candidate.atr),
+        )
     return True
 
 
 def sell_position(symbol: str, qty: float, reason: str, price: float, indicators: dict) -> bool:
+    if has_pending_exit(symbol):
+        print(f"Exit already submitted for {symbol}. Skipping duplicate exit.")
+        return False
+    if not cancel_protective_stop(symbol):
+        return False
     if has_open_order(symbol, "sell"):
         print(f"Open sell order exists for {symbol}. Skipping duplicate exit.")
         return False
@@ -187,10 +313,10 @@ def sell_position(symbol: str, qty: float, reason: str, price: float, indicators
         "relative_strength_score": entry.get("relative_strength", ""), "volume_ratio": entry.get("volume_ratio", ""),
         "holding_duration": _holding_duration(entry.get("timestamp")),
     })
-    if placed:
+    bot_state.set_pending_exit(symbol, getattr(placed, "id", ""), reason)
+    if getattr(placed, "filled_at", None):
         mark_recently_sold(symbol)
-        return True
-    return False
+    return bool(placed)
 
 
 def _holding_duration(timestamp) -> str:
@@ -217,6 +343,7 @@ def manage_position(symbol: str, frame) -> bool:
     highest = bot_state.update_highest(symbol, max(entry_price, latest_price))
     proposed = highest - settings.atr_multiplier * float(latest["atr"])
     atr_stop = bot_state.update_trailing_stop(symbol, proposed)
+    ensure_protective_stop(symbol, qty, max(entry_price * (1-settings.hard_stop_percent), atr_stop))
     decision = momentum_exit_decision(frame, entry_price=entry_price, highest_price=highest,
                                       settings=settings, atr_stop_floor=atr_stop,
                                       completed_bar_offset=1 if settings.data_interval.endswith("d") else 0)

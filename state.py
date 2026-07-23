@@ -12,6 +12,8 @@ class BotState:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.data: dict[str, Any] = {
             "cooldowns": {},
+            "pending_exits": {},
+            "protective_stops": {},
             "highest_prices": {},
             "entry_prices": {},
             "trailing_stops": {},
@@ -42,7 +44,38 @@ class BotState:
         self.data["entry_prices"].pop(symbol, None)
         self.data["trailing_stops"].pop(symbol, None)
         self.data["entries"].pop(symbol, None)
+        self.data["pending_exits"].pop(symbol, None)
+        self.data["protective_stops"].pop(symbol, None)
         self.save()
+
+    def set_pending_exit(self, symbol: str, order_id: str, reason: str = "") -> None:
+        self.data["pending_exits"][symbol] = {
+            "order_id": str(order_id),
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+            "reason": reason,
+        }
+        self.save()
+
+    def pending_exit(self, symbol: str) -> dict[str, Any]:
+        return dict(self.data["pending_exits"].get(symbol, {}))
+
+    def clear_pending_exit(self, symbol: str) -> None:
+        if self.data["pending_exits"].pop(symbol, None) is not None:
+            self.save()
+
+    def set_protective_stop(self, symbol: str, order_id: str, stop_price: float) -> None:
+        self.data["protective_stops"][symbol] = {
+            "order_id": str(order_id), "stop_price": float(stop_price),
+            "reason": "protective_stop",
+        }
+        self.save()
+
+    def protective_stop(self, symbol: str) -> dict[str, Any]:
+        return dict(self.data["protective_stops"].get(symbol, {}))
+
+    def clear_protective_stop(self, symbol: str) -> None:
+        if self.data["protective_stops"].pop(symbol, None) is not None:
+            self.save()
 
     def set_entry(self, symbol: str, price: float, metadata: dict[str, Any] | None = None) -> None:
         self.data["entry_prices"][symbol] = price

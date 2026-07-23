@@ -1,0 +1,68 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+from paper_trades import paper_trade_report, reconcile_filled_orders
+from state import BotState
+from trade_logger import TradeLogger
+
+
+def order(order_id, timestamp, symbol, side, qty, price):
+    return SimpleNamespace(id=order_id, filled_at=timestamp, submitted_at=timestamp,
+                           symbol=symbol, side=side, filled_qty=qty, filled_avg_price=price)
+
+
+class PaperTradeTests(unittest.TestCase):
+    def test_reconcile_is_idempotent_and_calculates_fifo_pnl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logger = TradeLogger(directory)
+            orders = [order("buy-1", "2026-01-01T00:00:00Z", "ABC", "buy", 2, 10),
+                      order("sell-1", "2026-01-02T00:00:00Z", "ABC", "sell", 1, 12)]
+            first = reconcile_filled_orders(orders, logger)
+            second = reconcile_filled_orders(orders, logger)
+            self.assertEqual(first, {"imported": 2, "updated": 0, "total": 2})
+            self.assertEqual(second, {"imported": 0, "updated": 2, "total": 2})
+            rows = logger.read()
+            self.assertEqual(float(rows[1]["realized_pl"]), 2.0)
+            self.assertEqual(float(rows[1]["entry_price"]), 10.0)
+
+    def test_reconcile_replaces_provisional_zero_quantity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logger = TradeLogger(directory)
+            logger.log(symbol="ABC", side="sell", qty=0, order_id="sell-1")
+            reconcile_filled_orders(
+                [order("sell-1", "2026-01-02T00:00:00Z", "ABC", "sell", 3, 12)], logger)
+            row = logger.read()[0]
+            self.assertEqual(float(row["qty"]), 3.0)
+            self.assertEqual(float(row["exit_price"]), 12.0)
+
+    def test_report_keeps_paper_results_separate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logger = TradeLogger(directory)
+            reconcile_filled_orders(
+                [order("b", "2026-01-01", "ABC", "buy", 1, 10),
+                 order("s", "2026-01-02", "ABC", "sell", 1, 11)], logger)
+            output = Path(directory) / "results"
+            report = paper_trade_report(str(logger.path), str(output))
+            self.assertEqual(report["logged_orders"], 2)
+            self.assertEqual(report["matched_closed_trades"], 1)
+            self.assertEqual(report["total_pl"], 1.0)
+            self.assertTrue((output / "paper_summary.json").exists())
+            self.assertTrue((output / "paper_trades.csv").exists())
+
+    def test_pending_exit_is_persisted_and_cleared_when_sold(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = BotState(directory)
+            state.set_pending_exit("ABC", "order-1", "hard_stop")
+            reloaded = BotState(directory)
+            self.assertEqual(reloaded.pending_exit("ABC")["order_id"], "order-1")
+            self.assertEqual(reloaded.pending_exit("ABC")["reason"], "hard_stop")
+            reloaded.mark_sold("ABC")
+            self.assertEqual(reloaded.pending_exit("ABC"), {})
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -18,7 +18,18 @@ Edit `.env` with Alpaca credentials. Paper trading is enabled by default.
 python launcher.py
 ```
 
-`launcher.py` restarts the bot after unexpected crashes. Trades are logged to `logs/trades.csv`, and runtime state is stored under `state/`.
+`launcher.py` restarts the bot after unexpected crashes. Trades are logged to `logs/trades.csv`, and runtime state is stored under `state/`. Filled stock entries receive a broker-side day stop that is restored or ratcheted as the bot runs. Stop orders reduce intraday risk but cannot guarantee the stop price when a stock gaps through it.
+
+To reconcile the log with Alpaca's filled paper orders and produce a separate
+paper-performance report:
+
+```bash
+python backtester.py --paper-trades --sync-paper-trades
+```
+
+This writes `backtest_results/paper_trades.csv` and `paper_summary.json`. Re-running
+the command is safe: broker orders are merged by order ID. Without
+`--sync-paper-trades`, the report uses the local log and does not contact Alpaca.
 
 ## Backtest
 
@@ -26,7 +37,7 @@ python launcher.py
 python backtester.py --start 2022-01-01 --end 2025-12-31
 ```
 
-Signal decisions use completed bars and execute at the next bar's open. Results, the equity curve, and trades are saved under `backtest_results/`.
+Signal decisions use completed bars and execute at the next bar's open. Protective stops fill at the configured stop when the daily range touches it, or at the open when price gaps through it. Remaining holdings are marked out at the final close. Results, the equity curve, and the complete buy/sell ledger are saved under `backtest_results/`.
 
 Parameter comparison (80 combinations, with no automatic winner selection):
 

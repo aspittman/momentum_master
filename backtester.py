@@ -15,6 +15,10 @@ from signals import momentum_exit_decision
 from strategy import evaluate_prepared_symbol, market_regime_allows_buys
 
 
+class BacktestDataError(RuntimeError):
+    """Raised when a backtest cannot obtain enough market data to run."""
+
+
 @dataclass
 class BacktestPosition:
     symbol: str
@@ -92,34 +96,68 @@ def run_backtest(start: str, end: str, initial_cash: float, *, cfg=None,
                  output_dir: str | None = None, prepared_data=None):
     cfg = cfg or settings
     benchmark, prepared = prepared_data or _prepare(start, end, cfg)
+    if benchmark.empty:
+        raise BacktestDataError(
+            f"No benchmark data was available for {cfg.benchmark_symbol} from {start} through {end}."
+        )
+    if not prepared:
+        raise BacktestDataError(
+            f"No symbol data was available from {start} through {end}; no report was written."
+        )
     dates = sorted(set().union(*(frame.index for frame in prepared.values()))) if prepared else []
+    if not dates:
+        raise BacktestDataError(
+            f"The downloaded symbol data contained no trading dates from {start} through {end}."
+        )
     cash, positions, cooldowns = initial_cash, {}, {}
     pending_buys: list = []
     pending_sells: dict[str, str] = {}
     trades, equity_curve = [], []
+
+    def close_position(symbol: str, date: pd.Timestamp, price: float, reason: str, row) -> None:
+        nonlocal cash
+        position = positions.pop(symbol)
+        proceeds = position.qty * price
+        pnl = position.qty * (price - position.entry_price)
+        cash += proceeds
+        regime = "bullish" if market_regime_allows_buys(
+            benchmark.loc[:date].iloc[:-1], cfg.market_ma_fast, cfg.market_ma_slow
+        ) else "bearish"
+        trades.append({"timestamp": date, "symbol": symbol, "side": "sell", "qty": position.qty,
+            "notional": proceeds, "entry_price": position.entry_price, "exit_price": price,
+            "realized_pl": pnl, "realized_pl_percent": price / position.entry_price - 1,
+            "entry_score": position.candidate.score, "entry_reason": "momentum_entry",
+            "exit_reason": reason, "atr_at_entry": position.candidate.atr,
+            "atr_at_exit": row.get("atr", ""),
+            "holding_days": (date - position.entry_date).total_seconds() / 86400,
+            "market_regime": regime})
+        cooldowns[symbol] = date
 
     for date in dates:
         # Orders generated from the previous completed bar execute at this bar's open.
         for symbol, reason in list(pending_sells.items()):
             if symbol not in positions or date not in prepared[symbol].index:
                 continue
-            position = positions.pop(symbol)
             row = prepared[symbol].loc[date]
             price = float(row["Open"])
-            proceeds = position.qty * price
-            pnl = position.qty * (price - position.entry_price)
-            cash += proceeds
-            regime = "bullish" if market_regime_allows_buys(
-                benchmark.loc[:date].iloc[:-1], cfg.market_ma_fast, cfg.market_ma_slow
-            ) else "bearish"
-            trades.append({"timestamp": date, "symbol": symbol, "side": "sell", "qty": position.qty,
-                "entry_price": position.entry_price, "exit_price": price, "realized_pl": pnl,
-                "realized_pl_percent": price / position.entry_price - 1, "entry_score": position.candidate.score,
-                "entry_reason": "momentum_entry", "exit_reason": reason,
-                "atr_at_entry": position.candidate.atr, "atr_at_exit": row.get("atr", ""),
-                "holding_days": (date - position.entry_date).total_seconds() / 86400, "market_regime": regime})
-            cooldowns[symbol] = date
+            close_position(symbol, date, price, reason, row)
             del pending_sells[symbol]
+
+        # A broker-held stop is active during the session. A gap through the
+        # stop fills at the open; otherwise a touch of the daily low fills at
+        # the stop price.
+        for symbol, position in list(positions.items()):
+            if date not in prepared[symbol].index:
+                continue
+            row = prepared[symbol].loc[date]
+            stop = max(position.entry_price * (1 - cfg.hard_stop_percent), position.trailing_stop)
+            open_price, low = float(row["Open"]), float(row["Low"])
+            if open_price <= stop:
+                close_position(symbol, date, open_price, "protective_stop", row)
+                pending_sells.pop(symbol, None)
+            elif low <= stop:
+                close_position(symbol, date, stop, "protective_stop", row)
+                pending_sells.pop(symbol, None)
 
         buys_executed = 0
         for candidate in pending_buys:
@@ -142,10 +180,20 @@ def run_backtest(start: str, end: str, initial_cash: float, *, cfg=None,
                 price - cfg.atr_multiplier * candidate.atr,
             )
             trades.append({"timestamp": date, "symbol": symbol, "side": "buy", "qty": qty,
-                           "entry_price": price, "entry_score": candidate.score,
+                           "notional": allocation, "entry_price": price, "entry_score": candidate.score,
                            "entry_reason": "momentum_entry", "atr_at_entry": candidate.atr})
             buys_executed += 1
         pending_buys = []
+
+        # Newly filled entries receive their initial protective stop
+        # immediately and can therefore stop out during the entry session.
+        for symbol, position in list(positions.items()):
+            if position.entry_date != date:
+                continue
+            row = prepared[symbol].loc[date]
+            stop = max(position.entry_price * (1 - cfg.hard_stop_percent), position.trailing_stop)
+            if float(row["Low"]) <= stop:
+                close_position(symbol, date, stop, "protective_stop", row)
 
         # Completed-close decisions schedule orders for the next available bar.
         for symbol, position in positions.items():
@@ -181,6 +229,35 @@ def run_backtest(start: str, end: str, initial_cash: float, *, cfg=None,
             p.qty * float(prepared[s].loc[:date].iloc[-1]["Close"]) for s, p in positions.items()
         )
         equity_curve.append({"timestamp": date, "equity": cash + market_value})
+
+    # Realize every remaining holding at the final available close so the trade
+    # ledger and summary include the complete performance through the requested
+    # backtest boundary.
+    if dates:
+        final_date = dates[-1]
+        for symbol, position in list(positions.items()):
+            available = prepared[symbol].loc[:final_date]
+            if available.empty:
+                continue
+            row = available.iloc[-1]
+            price = float(row["Close"])
+            proceeds = position.qty * price
+            pnl = position.qty * (price - position.entry_price)
+            cash += proceeds
+            trades.append({"timestamp": available.index[-1], "symbol": symbol, "side": "sell",
+                "qty": position.qty, "notional": proceeds, "entry_price": position.entry_price,
+                "exit_price": price, "realized_pl": pnl,
+                "realized_pl_percent": price / position.entry_price - 1,
+                "entry_score": position.candidate.score, "entry_reason": "momentum_entry",
+                "exit_reason": "end_of_backtest", "atr_at_entry": position.candidate.atr,
+                "atr_at_exit": row.get("atr", ""),
+                "holding_days": (available.index[-1] - position.entry_date).total_seconds() / 86400,
+                "market_regime": "bullish" if market_regime_allows_buys(
+                    benchmark.loc[:final_date], cfg.market_ma_fast, cfg.market_ma_slow
+                ) else "bearish"})
+            del positions[symbol]
+        if equity_curve:
+            equity_curve[-1]["equity"] = cash
 
     summary = summarize(trades, equity_curve)
     if output_dir:
@@ -230,14 +307,34 @@ def walk_forward(start, end, initial_cash, train_days, test_days, output_dir):
 
 def main():
     parser = argparse.ArgumentParser(description="Backtest MomentumMaster without look-ahead bias.")
-    parser.add_argument("--start", required=True); parser.add_argument("--end", required=True)
+    parser.add_argument("--start"); parser.add_argument("--end")
     parser.add_argument("--initial-cash", type=float, default=10000.0)
     parser.add_argument("--output-dir", default="backtest_results")
     parser.add_argument("--compare-parameters", action="store_true")
     parser.add_argument("--walk-forward", action="store_true")
+    parser.add_argument("--paper-trades", action="store_true",
+                        help="Report actual paper orders instead of running a simulation.")
+    parser.add_argument("--sync-paper-trades", action="store_true",
+                        help="Refresh the paper log from Alpaca before reporting it.")
+    parser.add_argument("--trade-log", default=None)
     parser.add_argument("--train-days", type=int, default=365); parser.add_argument("--test-days", type=int, default=90)
     args = parser.parse_args()
-    if args.compare_parameters:
+    if args.paper_trades or args.sync_paper_trades:
+        from paper_trades import paper_trade_report, sync_from_alpaca
+        from trade_logger import TradeLogger
+        log_dir = str(Path(args.trade_log).parent) if args.trade_log else settings.log_dir
+        logger = TradeLogger(log_dir)
+        if args.sync_paper_trades:
+            if not settings.alpaca_paper:
+                parser.error("Paper-log sync is disabled when ALPACA_PAPER is false.")
+            from trader import get_trading_client
+            result = sync_from_alpaca(get_trading_client(), logger)
+            print(f"Paper log sync: {result['imported']} imported, {result['updated']} updated, {result['total']} total.")
+        report = paper_trade_report(str(logger.path), args.output_dir)
+        for key, value in report.items(): print(f"{key}: {value}")
+    elif not args.start or not args.end:
+        parser.error("--start and --end are required for a historical backtest.")
+    elif args.compare_parameters:
         result = parameter_comparison(args.start, args.end, args.initial_cash, args.output_dir)
         print(f"Saved {len(result)} out-of-sample parameter comparisons.")
     elif args.walk_forward:

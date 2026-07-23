@@ -15,10 +15,12 @@ from trader import (
     get_open_positions_count,
     get_total_market_value,
     get_trading_client,
+    get_stock_positions,
     is_in_cooldown,
     manage_position,
     print_account_info,
     print_position,
+    reconcile_pending_exits,
 )
 
 
@@ -56,7 +58,9 @@ def latest_signal_frame(symbol: str):
 def manage_open_positions() -> None:
     print("\n=== MANAGING OPEN POSITIONS ===")
     sold_this_cycle: set[str] = set()
-    symbols = [str(position.symbol) for position in get_trading_client().get_all_positions()]
+    positions = get_stock_positions()
+    symbols = {str(position.symbol).upper() for position in positions}
+    reconcile_pending_exits(symbols)
     for symbol in symbols:
         try:
             if not already_holding(symbol):
@@ -119,6 +123,12 @@ def run_cycle() -> None:
 
 
 def run_bot() -> None:
+    # Recover fills completed while the process was stopped or after an order's
+    # brief synchronous wait expired.
+    from paper_trades import sync_from_alpaca
+    from trader import trade_logger
+    result = sync_from_alpaca(get_trading_client(), trade_logger)
+    print(f"Paper trade log reconciled ({result['total']} filled orders).")
     wait_for_market_open()
     print("Starting MomentumMaster stock momentum bot...")
     while True:

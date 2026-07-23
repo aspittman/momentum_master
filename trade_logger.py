@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,3 +43,21 @@ class TradeLogger:
         with self.path.open("a", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=TRADE_FIELDS)
             writer.writerow(row)
+
+    def read(self) -> list[dict[str, str]]:
+        if not self.path.exists():
+            return []
+        with self.path.open(newline="") as handle:
+            return list(csv.DictReader(handle))
+
+    def replace(self, rows: list[dict[str, Any]]) -> None:
+        """Atomically replace the log after broker reconciliation."""
+        temporary = self.path.with_suffix(".csv.tmp")
+        with temporary.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=TRADE_FIELDS)
+            writer.writeheader()
+            for values in rows:
+                writer.writerow({field: values.get(field, "") for field in TRADE_FIELDS})
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(self.path)

@@ -114,24 +114,36 @@ def evaluate_prepared_symbol(symbol: str, frame: pd.DataFrame, settings) -> Cand
         if price > upper * (1 + settings.bollinger_max_extension):
             return None
 
-    hist_scale = abs(float(latest["macd"])) or price * 0.001
-    rs_component = relative_strength
-    hist_component = float(latest["macd_hist"]) / hist_scale
-    acceleration_component = float(latest["macd_hist"] - previous["macd_hist"]) / hist_scale
-    ema_distance = (price - ema_fast) / ema_fast
-    ema_slope = (ema_fast - float(previous["ema_fast"])) / float(previous["ema_fast"])
-    recent_momentum = float(latest["momentum_5"])
+    def normalized(value: float, typical_strong_value: float) -> float:
+        """Scale unlike indicators to a bounded, comparable [-1, 1] range."""
+        return max(-1.0, min(1.0, value / typical_strong_value))
+
+    # Price-normalize MACD values before applying bounded scales. Dividing the
+    # histogram by MACD itself was unstable whenever MACD approached zero and
+    # allowed a single component to overwhelm the complete ranking.
+    hist_percent = float(latest["macd_hist"]) / price
+    acceleration_percent = float(latest["macd_hist"] - previous["macd_hist"]) / price
+    ema_distance_raw = (price - ema_fast) / ema_fast
+    ema_slope_raw = (ema_fast - float(previous["ema_fast"])) / float(previous["ema_fast"])
+    recent_momentum_raw = float(latest["momentum_5"])
+    rs_component = normalized(relative_strength, 0.10)
+    hist_component = normalized(hist_percent, 0.01)
+    acceleration_component = normalized(acceleration_percent, 0.005)
+    ema_distance = normalized(ema_distance_raw, 0.10)
+    ema_slope = normalized(ema_slope_raw, 0.02)
+    volume_component = normalized(max(0.0, volume_ratio - 1.0), 1.0)
+    recent_momentum = normalized(recent_momentum_raw, 0.10)
     breakout = 0.0
     if settings.enable_breakout_score and len(frame) > settings.breakout_lookback:
         prior_high = float(frame["High"].iloc[-settings.breakout_lookback - 1:-1].max())
-        breakout = max(0.0, (price - prior_high) / prior_high)
-    score = 100 * (
+        breakout = normalized(max(0.0, (price - prior_high) / prior_high), 0.10)
+    score = (
         settings.score_weight_relative_strength * rs_component
         + settings.score_weight_macd_strength * hist_component
         + settings.score_weight_macd_acceleration * acceleration_component
         + settings.score_weight_ema_distance * ema_distance
         + settings.score_weight_ema_slope * ema_slope
-        + settings.score_weight_volume * max(0.0, volume_ratio - 1.0)
+        + settings.score_weight_volume * volume_component
         + settings.score_weight_price_momentum * recent_momentum
         + settings.score_weight_breakout * breakout
     )

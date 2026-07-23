@@ -1,0 +1,13 @@
+{
+  "logged_orders": 43,
+  "buys": 22,
+  "sells": 21,
+  "matched_closed_trades": 21,
+  "total_trades": 21,
+  "win_rate": 0.5238095238095238,
+  "expectancy": 16.1,
+  "profit_factor": 3.528228520152549,
+  "average_win": 42.893636363636354,
+  "average_loss": -13.372999999999987,
+  "total_pl": 338.1
+}
