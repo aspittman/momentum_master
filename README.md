@@ -48,3 +48,22 @@ python backtester.py --start 2024-01-01 --end 2025-12-31 --compare-parameters
 Treat the supplied comparison period as out-of-sample; do not reuse the training period used to choose candidates or settings. Optional sequential walk-forward reporting is available with `--walk-forward --train-days 365 --test-days 90` and explicitly saves in-sample and out-of-sample results.
 
 Important `.env` controls include `MAX_NEW_BUYS_PER_CYCLE`, `ATR_WINDOW`, `ATR_TRAILING_MULTIPLIER`, `HARD_STOP_PERCENT`, `ENABLE_EMA20_EXIT`, `ENABLE_MACD_BEARISH_EXIT`, `ENABLE_MARKET_REGIME_FILTER`, `RELATIVE_STRENGTH_LOOKBACK`, `MIN_VOLUME_RATIO`, and `COOLDOWN_SECONDS`. The defaults implement the short-term stock momentum profile described above.
+
+## Risk controls
+
+Entries are sized from the initial stop distance so the default maximum planned
+loss is 0.5% of configured capital, capped at `$500` per position. New entries
+are automatically suspended after a 2% daily realized loss, 5% weekly realized
+loss, 8% realized peak-to-trough drawdown, or four consecutive stock losses.
+Existing positions continue to be managed. New entries are also blocked whenever
+market data or a protective stop for any held stock cannot be verified.
+
+The related `.env` controls are `RISK_PER_TRADE_PERCENT`,
+`MAX_DAILY_LOSS_PERCENT`, `MAX_WEEKLY_LOSS_PERCENT`, `MAX_DRAWDOWN_PERCENT`,
+`MAX_CONSECUTIVE_LOSSES`, and `MAX_POSITIONS_PER_SECTOR`. Circuit breakers require
+operator review before changing their thresholds. Broker stops reduce risk but
+cannot prevent losses caused by overnight gaps or unavailable markets.
+
+Paper reports exclude option contract symbols reconciled from the same Alpaca
+account and include realized return and realized drawdown. Unrealized P/L still
+requires current broker positions and is explicitly excluded from the report.

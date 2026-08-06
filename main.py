@@ -8,6 +8,8 @@ from config import settings
 from indicators import add_indicators
 from market_data import download_symbol
 from strategy import market_regime_allows_buys, scan_universe
+from risk import evaluate_risk_gate, risk_sized_notional
+from universe import sector_for_symbol
 from trader import (
     already_holding,
     buy_candidate,
@@ -55,10 +57,11 @@ def latest_signal_frame(symbol: str):
     return frame
 
 
-def manage_open_positions() -> None:
+def manage_open_positions() -> bool:
     print("\n=== MANAGING OPEN POSITIONS ===")
     sold_this_cycle: set[str] = set()
     positions = get_stock_positions()
+    protection_ok = True
     symbols = {str(position.symbol).upper() for position in positions}
     reconcile_pending_exits(symbols)
     for symbol in symbols:
@@ -67,12 +70,16 @@ def manage_open_positions() -> None:
                 continue
             frame = latest_signal_frame(symbol)
             if frame is None or frame.empty:
+                protection_ok = False
+                print(f"SAFETY: no market data for {symbol}; new entries will be blocked.")
                 continue
             if symbol not in sold_this_cycle and manage_position(symbol, frame):
                 sold_this_cycle.add(symbol)
             print_position(symbol)
         except Exception as exc:
+            protection_ok = False
             print(f"Error managing {symbol}: {exc}")
+    return protection_ok
 
 
 def can_open_new_buys() -> bool:
@@ -89,7 +96,17 @@ def run_cycle() -> None:
     print("\n==============================")
     print("NEW MOMENTUMMASTER CYCLE")
     print("==============================")
-    manage_open_positions()
+    if not manage_open_positions():
+        print("SAFETY: not all held positions could be verified and managed. New buys disabled.")
+        print_account_info()
+        return
+
+    from trader import trade_logger
+    gate = evaluate_risk_gate(trade_logger.path, settings)
+    if not gate.allowed:
+        print(f"RISK CIRCUIT BREAKER: new buys disabled ({'; '.join(gate.reasons)}).")
+        print_account_info()
+        return
 
     if not can_open_new_buys():
         print_account_info()
@@ -101,6 +118,10 @@ def run_cycle() -> None:
 
     open_positions = get_open_positions_count()
     total_capital_used = get_total_market_value()
+    held_sectors = {}
+    for position in get_stock_positions():
+        sector = sector_for_symbol(str(position.symbol))
+        held_sectors[sector] = held_sectors.get(sector, 0) + 1
     new_buys = 0
     for candidate in candidates[: settings.max_candidates_per_cycle]:
         if new_buys >= settings.max_new_buys_per_cycle:
@@ -108,16 +129,25 @@ def run_cycle() -> None:
         if open_positions >= settings.max_positions:
             print("Max positions reached.")
             break
-        if total_capital_used + settings.dollars_per_trade > settings.max_total_capital:
-            print("Max total capital reached.")
-            break
         if is_in_cooldown(candidate.symbol):
             print(f"{candidate.symbol} is on cooldown. Skipping.")
             continue
-        if buy_candidate(candidate):
+        sector = sector_for_symbol(candidate.symbol)
+        if held_sectors.get(sector, 0) >= settings.max_positions_per_sector:
+            print(f"Sector limit reached for {sector}. Skipping {candidate.symbol}.")
+            continue
+        notional = risk_sized_notional(candidate, settings)
+        if notional < 1.0:
+            print(f"Risk-sized allocation for {candidate.symbol} is below $1. Skipping.")
+            continue
+        if total_capital_used + notional > settings.max_total_capital:
+            print("Max total capital reached.")
+            break
+        if buy_candidate(candidate, notional=notional):
             new_buys += 1
             open_positions += 1
-            total_capital_used += settings.dollars_per_trade
+            total_capital_used += notional
+            held_sectors[sector] = held_sectors.get(sector, 0) + 1
         time.sleep(2)
     print_account_info()
 

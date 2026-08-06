@@ -185,7 +185,7 @@ def reconcile_pending_exits(open_symbols: set[str]) -> None:
             mark_recently_sold(symbol)
 
 
-def ensure_protective_stop(symbol: str, qty: float, stop_price: float) -> None:
+def ensure_protective_stop(symbol: str, qty: float, stop_price: float) -> bool:
     """Keep one session-long sell stop active, ratcheting upward but never down."""
     stop_price = round(float(stop_price), 2)
     existing = bot_state.protective_stop(symbol)
@@ -201,17 +201,18 @@ def ensure_protective_stop(symbol: str, qty: float, stop_price: float) -> None:
                         order_id, ReplaceOrderRequest(stop_price=stop_price)
                     )
                     bot_state.set_protective_stop(symbol, getattr(replacement, "id", order_id), stop_price)
-                return
+                return True
             bot_state.clear_protective_stop(symbol)
         except Exception as exc:
             print(f"Unable to verify protective stop for {symbol}: {exc}; not submitting a duplicate.")
-            return
+            return False
     order = get_trading_client().submit_order(StopOrderRequest(
         symbol=symbol, qty=qty, side=OrderSide.SELL, type=OrderType.STOP,
         time_in_force=TimeInForce.DAY, stop_price=stop_price,
     ))
     bot_state.set_protective_stop(symbol, getattr(order, "id", ""), stop_price)
     print(f"Protective stop active for {symbol} at ${stop_price:.2f}")
+    return True
 
 
 def cancel_protective_stop(symbol: str) -> bool:
@@ -255,7 +256,7 @@ def is_in_cooldown(symbol: str) -> bool:
     return bot_state.is_on_cooldown(symbol, settings.cooldown_seconds)
 
 
-def buy_candidate(candidate) -> bool:
+def buy_candidate(candidate, notional: float | None = None) -> bool:
     if already_holding(candidate.symbol):
         print(f"Already holding {candidate.symbol}. Skipping.")
         return False
@@ -265,7 +266,7 @@ def buy_candidate(candidate) -> bool:
     order = place_market_order(
         candidate.symbol,
         "buy",
-        notional=settings.dollars_per_trade,
+        notional=notional if notional is not None else settings.dollars_per_trade,
         reason="momentum_entry",
         score=candidate.score,
         log_fields={
@@ -343,7 +344,10 @@ def manage_position(symbol: str, frame) -> bool:
     highest = bot_state.update_highest(symbol, max(entry_price, latest_price))
     proposed = highest - settings.atr_multiplier * float(latest["atr"])
     atr_stop = bot_state.update_trailing_stop(symbol, proposed)
-    ensure_protective_stop(symbol, qty, max(entry_price * (1-settings.hard_stop_percent), atr_stop))
+    if not ensure_protective_stop(
+        symbol, qty, max(entry_price * (1-settings.hard_stop_percent), atr_stop)
+    ):
+        raise RuntimeError(f"protective stop for {symbol} could not be verified")
     decision = momentum_exit_decision(frame, entry_price=entry_price, highest_price=highest,
                                       settings=settings, atr_stop_floor=atr_stop,
                                       completed_bar_offset=1 if settings.data_interval.endswith("d") else 0)

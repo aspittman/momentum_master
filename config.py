@@ -56,8 +56,15 @@ class Settings:
     max_positions: int = _int("MAX_POSITIONS", 5)
     max_total_capital: float = _float("MAX_TOTAL_CAPITAL", 2500)
     dollars_per_trade: float = _float("DOLLARS_PER_TRADE", 500)
+    risk_per_trade_percent: float = _float("RISK_PER_TRADE_PERCENT", 0.005)
     max_candidates_per_cycle: int = _int("MAX_CANDIDATES_PER_CYCLE", 10)
     max_new_buys_per_cycle: int = _int("MAX_NEW_BUYS_PER_CYCLE", 2)
+    max_positions_per_sector: int = _int("MAX_POSITIONS_PER_SECTOR", 2)
+
+    max_daily_loss_percent: float = _float("MAX_DAILY_LOSS_PERCENT", 0.02)
+    max_weekly_loss_percent: float = _float("MAX_WEEKLY_LOSS_PERCENT", 0.05)
+    max_drawdown_percent: float = _float("MAX_DRAWDOWN_PERCENT", 0.08)
+    max_consecutive_losses: int = _int("MAX_CONSECUTIVE_LOSSES", 4)
 
     ema_fast: int = _int("EMA_FAST", 20)
     ema_slow: int = _int("EMA_SLOW", 50)

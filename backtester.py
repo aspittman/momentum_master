@@ -13,6 +13,8 @@ from indicators import add_indicators, add_relative_strength_with_lookback
 from market_data import download_history
 from signals import momentum_exit_decision
 from strategy import evaluate_prepared_symbol, market_regime_allows_buys
+from risk import risk_sized_notional
+from universe import sector_for_symbol
 
 
 class BacktestDataError(RuntimeError):
@@ -166,11 +168,16 @@ def run_backtest(start: str, end: str, initial_cash: float, *, cfg=None,
                 break
             if symbol in positions or date not in prepared[symbol].index:
                 continue
+            sector = sector_for_symbol(symbol)
+            if sum(sector_for_symbol(p.symbol) == sector for p in positions.values()) >= getattr(
+                cfg, "max_positions_per_sector", 2
+            ):
+                continue
             if cooldowns.get(symbol) is not None and (date - cooldowns[symbol]).total_seconds() < cfg.cooldown_seconds:
                 continue
-            allocation = min(cfg.dollars_per_trade, cash)
+            allocation = min(risk_sized_notional(candidate, cfg), cash)
             invested = sum(p.qty * p.entry_price for p in positions.values())
-            if allocation < cfg.dollars_per_trade or invested + allocation > cfg.max_total_capital:
+            if allocation < 1.0 or invested + allocation > cfg.max_total_capital:
                 continue
             price = float(prepared[symbol].loc[date, "Open"])
             qty = allocation / price
@@ -330,7 +337,9 @@ def main():
             from trader import get_trading_client
             result = sync_from_alpaca(get_trading_client(), logger)
             print(f"Paper log sync: {result['imported']} imported, {result['updated']} updated, {result['total']} total.")
-        report = paper_trade_report(str(logger.path), args.output_dir)
+        report = paper_trade_report(
+            str(logger.path), args.output_dir, starting_capital=settings.max_total_capital
+        )
         for key, value in report.items(): print(f"{key}: {value}")
     elif not args.start or not args.end:
         parser.error("--start and --end are required for a historical backtest.")

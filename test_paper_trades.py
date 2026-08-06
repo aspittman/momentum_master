@@ -53,6 +53,20 @@ class PaperTradeTests(unittest.TestCase):
             self.assertTrue((output / "paper_summary.json").exists())
             self.assertTrue((output / "paper_trades.csv").exists())
 
+    def test_options_are_excluded_from_stock_report_and_sync(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logger = TradeLogger(directory)
+            result = reconcile_filled_orders([
+                order("ob", "2026-01-01", "PFE260918C00025000", "buy", 1, 1),
+                order("os", "2026-01-02", "PFE260918C00025000", "sell", 1, 2),
+                order("sb", "2026-01-01", "ABC", "buy", 1, 10),
+                order("ss", "2026-01-02", "ABC", "sell", 1, 11),
+            ], logger)
+            self.assertEqual(result["total"], 2)
+            report = paper_trade_report(str(logger.path), starting_capital=100)
+            self.assertEqual(report["total_pl"], 1.0)
+            self.assertEqual(report["realized_return_percent"], 0.01)
+
     def test_pending_exit_is_persisted_and_cleared_when_sold(self):
         with tempfile.TemporaryDirectory() as directory:
             state = BotState(directory)

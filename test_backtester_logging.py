@@ -28,11 +28,12 @@ class BacktesterLoggingTests(unittest.TestCase):
             "Close": [10.5, 12.0], "atr": [1.0, 1.0],
         }, index=dates)
         benchmark = pd.DataFrame({"Close": [100.0, 101.0]}, index=dates)
-        candidate = SimpleNamespace(symbol="ABC", score=80.0, atr=1.0)
+        candidate = SimpleNamespace(symbol="ABC", score=80.0, atr=1.0, price=10.5)
         cfg = SimpleNamespace(
             max_new_buys_per_cycle=1, max_positions=1, cooldown_seconds=0,
             dollars_per_trade=100.0, max_total_capital=100.0,
-            atr_multiplier=1.5, hard_stop_percent=0.05, require_market_regime=False,
+            atr_multiplier=1.5, hard_stop_percent=0.05, risk_per_trade_percent=0.05,
+            max_positions_per_sector=2, require_market_regime=False,
             market_ma_fast=1, market_ma_slow=2,
         )
         with tempfile.TemporaryDirectory() as directory, \
@@ -57,11 +58,12 @@ class BacktesterLoggingTests(unittest.TestCase):
             "Close": [10.0, 8.5], "atr": [1.0, 1.0],
         }, index=dates)
         benchmark = pd.DataFrame({"Close": [100.0, 101.0]}, index=dates)
-        candidate = SimpleNamespace(symbol="ABC", score=80.0, atr=1.0)
+        candidate = SimpleNamespace(symbol="ABC", score=80.0, atr=1.0, price=10.0)
         cfg = SimpleNamespace(
             max_new_buys_per_cycle=1, max_positions=1, cooldown_seconds=0,
             dollars_per_trade=100.0, max_total_capital=100.0,
-            atr_multiplier=1.5, hard_stop_percent=0.05,
+            atr_multiplier=1.5, hard_stop_percent=0.05, risk_per_trade_percent=0.05,
+            max_positions_per_sector=2,
             require_market_regime=False, market_ma_fast=1, market_ma_slow=2,
         )
         with patch("backtester.evaluate_prepared_symbol", return_value=candidate), \

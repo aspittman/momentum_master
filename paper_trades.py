@@ -9,6 +9,7 @@ import pandas as pd
 
 from analytics import load_trades, summarize_trades
 from trade_logger import TRADE_FIELDS, TradeLogger
+from risk import is_option_symbol
 
 
 def _value(value: Any) -> str:
@@ -79,6 +80,8 @@ def reconcile_filled_orders(orders: list[Any], logger: TradeLogger) -> dict[str,
         broker_row = _filled_order_row(order)
         if broker_row is None:
             continue
+        if is_option_symbol(str(broker_row["symbol"])):
+            continue
         order_id = str(broker_row["order_id"])
         previous = by_id.get(order_id)
         if previous is None:
@@ -104,8 +107,11 @@ def sync_from_alpaca(client: Any, logger: TradeLogger) -> dict[str, int]:
     return reconcile_filled_orders(list(client.get_orders(filter=request)), logger)
 
 
-def paper_trade_report(log_path: str, output_dir: str | None = None) -> dict[str, Any]:
+def paper_trade_report(log_path: str, output_dir: str | None = None,
+                       starting_capital: float | None = None) -> dict[str, Any]:
     trades = load_trades(log_path)
+    if not trades.empty and "symbol" in trades:
+        trades = trades[~trades["symbol"].astype(str).map(is_option_symbol)].copy()
     if trades.empty:
         report: dict[str, Any] = {"logged_orders": 0, "buys": 0, "sells": 0,
                                   "matched_closed_trades": 0, "warning": "No paper orders are logged."}
@@ -131,6 +137,13 @@ def paper_trade_report(log_path: str, output_dir: str | None = None) -> dict[str
         buys, sells = int((sides == "buy").sum()), int((sides == "sell").sum())
         report = {"logged_orders": int(len(trades)), "buys": buys, "sells": sells,
                   "matched_closed_trades": int(len(closed)), **metrics}
+        if starting_capital and starting_capital > 0 and not closed.empty:
+            pnl = pd.to_numeric(closed["realized_pl"], errors="coerce").fillna(0)
+            equity = starting_capital + pnl.cumsum()
+            peaks = equity.cummax().clip(lower=starting_capital)
+            report["realized_return_percent"] = float(pnl.sum() / starting_capital)
+            report["realized_max_drawdown"] = float((equity / peaks - 1).min())
+            report["report_scope"] = "stock orders only; unrealized P/L excluded"
         if sells and not buys:
             report["warning"] = "Sell orders exist, but their corresponding buys are missing from the log."
     if output_dir:
