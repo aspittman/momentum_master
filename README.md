@@ -67,3 +67,8 @@ cannot prevent losses caused by overnight gaps or unavailable markets.
 Paper reports exclude option contract symbols reconciled from the same Alpaca
 account and include realized return and realized drawdown. Unrealized P/L still
 requires current broker positions and is explicitly excluded from the report.
+New orders also record expected versus filled price, adverse slippage in basis
+points and dollars, and fill latency. Positive slippage is adverse for both buys
+and sells; negative values represent price improvement. The paper summary reports
+average, median, and 95th-percentile adverse slippage so execution can be compared
+with the historical stress thresholds.

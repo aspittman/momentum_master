@@ -18,8 +18,22 @@ TRADE_FIELDS = [
     "entry_score", "entry_reason", "exit_reason", "atr_at_entry", "atr_at_exit",
     "ema20", "ema50", "macd", "macd_signal", "macd_histogram",
     "relative_strength_score", "volume_ratio", "holding_duration",
+    "expected_price", "slippage_bps", "slippage_dollars",
+    "submitted_at", "filled_at", "fill_latency_ms",
     "order_id",
 ]
+
+
+def execution_quality_fields(side: str, qty: float, expected_price: float,
+                             fill_price: float) -> dict[str, float]:
+    """Return positive values for adverse execution and negative for improvement."""
+    direction = 1.0 if side.lower() == "buy" else -1.0
+    price_difference = direction * (fill_price - expected_price)
+    return {
+        "expected_price": expected_price,
+        "slippage_bps": price_difference / expected_price * 10_000,
+        "slippage_dollars": qty * price_difference,
+    }
 
 
 class TradeLogger:
@@ -28,10 +42,17 @@ class TradeLogger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.path.exists():
             with self.path.open(newline="") as handle:
-                existing_fields = next(csv.reader(handle), [])
+                reader = csv.DictReader(handle)
+                existing_fields = reader.fieldnames or []
+                existing_rows = list(reader)
             if existing_fields != TRADE_FIELDS:
-                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-                shutil.move(self.path, self.path.with_name(f"trades_legacy_{stamp}.csv"))
+                if set(existing_fields).issubset(TRADE_FIELDS):
+                    # Additive schema upgrades preserve the active ledger and
+                    # leave historical quality fields blank when unknowable.
+                    self.replace(existing_rows)
+                else:
+                    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                    shutil.move(self.path, self.path.with_name(f"trades_legacy_{stamp}.csv"))
         if not self.path.exists():
             with self.path.open("w", newline="") as handle:
                 writer = csv.DictWriter(handle, fieldnames=TRADE_FIELDS)

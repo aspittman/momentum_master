@@ -9,7 +9,7 @@ from alpaca.trading.requests import MarketOrderRequest, ReplaceOrderRequest, Sto
 
 from config import settings
 from state import BotState
-from trade_logger import TradeLogger
+from trade_logger import TradeLogger, execution_quality_fields
 
 
 trading_client: TradingClient | None = None
@@ -96,6 +96,7 @@ def place_market_order(
         side=order_side,
         time_in_force=TimeInForce.DAY,
     )
+    request_started = time.perf_counter()
     order = get_trading_client().submit_order(request)
     # Wait briefly for a complete fill. Accepted/unfilled orders are recovered by
     # startup reconciliation instead of being written as zero-quantity trades.
@@ -110,7 +111,21 @@ def place_market_order(
     filled_qty = getattr(order, "filled_qty", None)
     filled_price = getattr(order, "filled_avg_price", None)
     fields = dict(log_fields or {})
+    submitted_at = getattr(order, "submitted_at", None)
+    filled_at = getattr(order, "filled_at", None)
+    fields["submitted_at"] = str(submitted_at or "")
+    fields["filled_at"] = str(filled_at or "")
+    if filled_at:
+        fields["fill_latency_ms"] = round((time.perf_counter() - request_started) * 1000, 3)
     if filled_price:
+        try:
+            expected_price = float(price)
+        except (TypeError, ValueError):
+            expected_price = 0.0
+        if expected_price > 0:
+            fields.update(execution_quality_fields(
+                side, float(filled_qty or qty or 0), expected_price, float(filled_price)
+            ))
         fields["entry_price" if side.lower() == "buy" else "exit_price"] = filled_price
         if side.lower() == "sell" and fields.get("entry_price"):
             actual_qty = float(filled_qty or qty or 0)
@@ -179,6 +194,14 @@ def reconcile_pending_exits(open_symbols: set[str]) -> None:
                     for row in rows:
                         if str(row.get("order_id", "")) == str(order_id):
                             row["exit_reason"] = record.get("reason", "")
+                            try:
+                                expected = float(record.get("stop_price") or 0)
+                                filled = float(row.get("exit_price") or 0)
+                                qty = float(row.get("qty") or 0)
+                            except (TypeError, ValueError):
+                                expected = filled = qty = 0
+                            if expected > 0 and filled > 0 and qty > 0:
+                                row.update(execution_quality_fields("sell", qty, expected, filled))
                     trade_logger.replace(rows)
                 except Exception as exc:
                     print(f"Unable to reconcile completed exit for {symbol}: {exc}")
@@ -303,7 +326,7 @@ def sell_position(symbol: str, qty: float, reason: str, price: float, indicators
     entry = bot_state.entry_metadata(symbol)
     entry_price = float(entry.get("price", indicators.get("entry_price", price)))
     pnl = qty * (price - entry_price)
-    placed = place_market_order(symbol, "sell", qty=qty, reason=reason, log_fields={
+    placed = place_market_order(symbol, "sell", qty=qty, reason=reason, price=price, log_fields={
         "entry_price": entry_price, "exit_price": price,
         "realized_pl": pnl, "realized_pl_percent": (price / entry_price - 1) if entry_price else "",
         "entry_score": entry.get("score", ""), "entry_reason": entry.get("entry_reason", "momentum_entry"),

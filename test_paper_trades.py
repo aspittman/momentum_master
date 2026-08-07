@@ -67,6 +67,21 @@ class PaperTradeTests(unittest.TestCase):
             self.assertEqual(report["total_pl"], 1.0)
             self.assertEqual(report["realized_return_percent"], 0.01)
 
+    def test_report_summarizes_execution_quality(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logger = TradeLogger(directory)
+            logger.log(symbol="ABC", side="buy", qty=1, entry_price=10,
+                       expected_price=9.99, slippage_bps=10, slippage_dollars=.01,
+                       fill_latency_ms=100, order_id="b")
+            logger.log(symbol="ABC", side="sell", qty=1, entry_price=10, exit_price=11,
+                       realized_pl=1, expected_price=11.01, slippage_bps=9,
+                       slippage_dollars=.01, fill_latency_ms=200, order_id="s")
+            quality = paper_trade_report(str(logger.path))["execution_quality"]
+            self.assertEqual(quality["measured_orders"], 2)
+            self.assertAlmostEqual(quality["average_slippage_bps"], 9.5)
+            self.assertAlmostEqual(quality["total_slippage_dollars"], .02)
+            self.assertAlmostEqual(quality["average_fill_latency_ms"], 150)
+
     def test_pending_exit_is_persisted_and_cleared_when_sold(self):
         with tempfile.TemporaryDirectory() as directory:
             state = BotState(directory)

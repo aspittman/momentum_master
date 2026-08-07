@@ -5,9 +5,18 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import trader
+from trade_logger import execution_quality_fields
 
 
 class TraderSafetyTests(unittest.TestCase):
+    def test_execution_quality_is_adverse_positive_for_buys_and_sells(self):
+        buy = execution_quality_fields("buy", 2, 100, 100.10)
+        sell = execution_quality_fields("sell", 2, 100, 99.90)
+        self.assertAlmostEqual(buy["slippage_bps"], 10.0)
+        self.assertAlmostEqual(sell["slippage_bps"], 10.0)
+        self.assertAlmostEqual(buy["slippage_dollars"], 0.20)
+        self.assertAlmostEqual(sell["slippage_dollars"], 0.20)
+
     def test_only_us_equity_positions_are_selected(self):
         positions = [
             SimpleNamespace(symbol="AAPL", asset_class="us_equity"),

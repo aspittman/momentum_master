@@ -30,12 +30,20 @@ def _filled_order_row(order: Any) -> dict[str, Any] | None:
     if side not in {"buy", "sell"}:
         return None
     timestamp = getattr(order, "filled_at", None) or getattr(order, "submitted_at", None)
-    return {
+    row = {
         "timestamp": _value(timestamp), "symbol": _value(getattr(order, "symbol", "")).upper(),
         "side": side, "qty": qty, "notional": qty * price,
         "entry_price" if side == "buy" else "exit_price": price,
+        "submitted_at": _value(getattr(order, "submitted_at", None)),
+        "filled_at": _value(getattr(order, "filled_at", None)),
         "order_id": _value(getattr(order, "id", "")),
     }
+    submitted, filled = getattr(order, "submitted_at", None), getattr(order, "filled_at", None)
+    try:
+        row["fill_latency_ms"] = (filled - submitted).total_seconds() * 1000
+    except (TypeError, AttributeError):
+        pass
+    return row
 
 
 def _apply_fifo_pnl(rows: list[dict[str, Any]]) -> None:
@@ -137,6 +145,25 @@ def paper_trade_report(log_path: str, output_dir: str | None = None,
         buys, sells = int((sides == "buy").sum()), int((sides == "sell").sum())
         report = {"logged_orders": int(len(trades)), "buys": buys, "sells": sells,
                   "matched_closed_trades": int(len(closed)), **metrics}
+        slippage = pd.to_numeric(
+            trades.get("slippage_bps", pd.Series(dtype=float)), errors="coerce"
+        ).dropna()
+        slippage_dollars = pd.to_numeric(
+            trades.get("slippage_dollars", pd.Series(dtype=float)), errors="coerce"
+        ).dropna()
+        latency = pd.to_numeric(
+            trades.get("fill_latency_ms", pd.Series(dtype=float)), errors="coerce"
+        ).dropna()
+        if not slippage.empty:
+            report["execution_quality"] = {
+                "measured_orders": int(len(slippage)),
+                "average_slippage_bps": float(slippage.mean()),
+                "median_slippage_bps": float(slippage.median()),
+                "p95_adverse_slippage_bps": float(slippage.quantile(0.95)),
+                "total_slippage_dollars": float(slippage_dollars.sum()),
+                "average_fill_latency_ms": float(latency.mean()) if not latency.empty else None,
+                "p95_fill_latency_ms": float(latency.quantile(0.95)) if not latency.empty else None,
+            }
         if starting_capital and starting_capital > 0 and not closed.empty:
             pnl = pd.to_numeric(closed["realized_pl"], errors="coerce").fillna(0)
             equity = starting_capital + pnl.cumsum()
