@@ -54,6 +54,19 @@ class RiskTests(unittest.TestCase):
             }])
             self.assertTrue(evaluate_risk_gate(path, self.settings()).allowed)
 
+    def test_symbols_outside_strategy_universe_do_not_trip_circuit_breaker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_trades(directory, [
+                {"timestamp": "2026-08-06T14:00:00Z", "symbol": "XLP", "realized_pl": -500},
+                {"timestamp": "2026-08-06T15:00:00Z", "symbol": "BTC/USD", "realized_pl": -500},
+            ])
+            configured = self.settings(universe=["AAPL"])
+            gate = evaluate_risk_gate(
+                path, configured, datetime(2026, 8, 6, 20, tzinfo=timezone.utc)
+            )
+            self.assertTrue(gate.allowed)
+            self.assertEqual(gate.daily_pl, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

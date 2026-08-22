@@ -84,7 +84,15 @@ def _apply_fifo_pnl(rows: list[dict[str, Any]]) -> None:
             row["realized_pl_percent"] = price / average_entry - 1
 
 
-def reconcile_filled_orders(orders: list[Any], logger: TradeLogger) -> dict[str, int]:
+def _allowed(symbol: str, allowed_symbols: set[str] | list[str] | tuple[str, ...] | None) -> bool:
+    if allowed_symbols is None:
+        return True
+    return symbol.upper() in {str(item).upper() for item in allowed_symbols}
+
+
+def reconcile_filled_orders(orders: list[Any], logger: TradeLogger,
+                            allowed_symbols: set[str] | list[str] | tuple[str, ...] | None = None
+                            ) -> dict[str, int]:
     """Merge filled broker orders into the CSV, keyed by immutable order ID."""
     existing = logger.read()
     by_id = {row.get("order_id", ""): row for row in existing if row.get("order_id")}
@@ -93,7 +101,8 @@ def reconcile_filled_orders(orders: list[Any], logger: TradeLogger) -> dict[str,
         broker_row = _filled_order_row(order)
         if broker_row is None:
             continue
-        if is_option_symbol(str(broker_row["symbol"])):
+        symbol = str(broker_row["symbol"])
+        if is_option_symbol(symbol) or not _allowed(symbol, allowed_symbols):
             continue
         order_id = str(broker_row["order_id"])
         previous = by_id.get(order_id)
@@ -108,23 +117,37 @@ def reconcile_filled_orders(orders: list[Any], logger: TradeLogger) -> dict[str,
     existing.sort(key=lambda row: str(row.get("timestamp", "")))
     _apply_fifo_pnl(existing)
     logger.replace(existing)
-    return {"imported": imported, "updated": updated, "total": len(existing)}
+    total = sum(
+        _allowed(str(row.get("symbol", "")), allowed_symbols)
+        and not is_option_symbol(str(row.get("symbol", "")))
+        for row in existing
+    )
+    return {"imported": imported, "updated": updated, "total": total}
 
 
-def sync_from_alpaca(client: Any, logger: TradeLogger) -> dict[str, int]:
+def sync_from_alpaca(client: Any, logger: TradeLogger,
+                     allowed_symbols: set[str] | list[str] | tuple[str, ...] | None = None
+                     ) -> dict[str, int]:
     from alpaca.common.enums import Sort
     from alpaca.trading.enums import QueryOrderStatus
     from alpaca.trading.requests import GetOrdersRequest
 
     request = GetOrdersRequest(status=QueryOrderStatus.ALL, limit=500, direction=Sort.ASC)
-    return reconcile_filled_orders(list(client.get_orders(filter=request)), logger)
+    return reconcile_filled_orders(
+        list(client.get_orders(filter=request)), logger, allowed_symbols=allowed_symbols
+    )
 
 
 def paper_trade_report(log_path: str, output_dir: str | None = None,
-                       starting_capital: float | None = None) -> dict[str, Any]:
+                       starting_capital: float | None = None,
+                       allowed_symbols: set[str] | list[str] | tuple[str, ...] | None = None
+                       ) -> dict[str, Any]:
     trades = load_trades(log_path)
     if not trades.empty and "symbol" in trades:
         trades = trades[~trades["symbol"].astype(str).map(is_option_symbol)].copy()
+        if allowed_symbols is not None:
+            allowed = {str(symbol).upper() for symbol in allowed_symbols}
+            trades = trades[trades["symbol"].astype(str).str.upper().isin(allowed)].copy()
     if trades.empty:
         report: dict[str, Any] = {"logged_orders": 0, "buys": 0, "sells": 0,
                                   "matched_closed_trades": 0, "warning": "No paper orders are logged."}

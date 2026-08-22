@@ -204,7 +204,9 @@ def reconcile_pending_exits(open_symbols: set[str]) -> None:
                 try:
                     from paper_trades import reconcile_filled_orders
                     order = get_trading_client().get_order_by_id(order_id)
-                    reconcile_filled_orders([order], trade_logger)
+                    reconcile_filled_orders(
+                        [order], trade_logger, allowed_symbols=settings.universe
+                    )
                     rows = trade_logger.read()
                     for row in rows:
                         if str(row.get("order_id", "")) == str(order_id):

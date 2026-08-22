@@ -14,7 +14,7 @@ def is_option_symbol(symbol: str) -> bool:
     return bool(OPTION_SYMBOL.search(str(symbol).upper()))
 
 
-def stock_closed_trades(path) -> pd.DataFrame:
+def stock_closed_trades(path, allowed_symbols=None) -> pd.DataFrame:
     try:
         trades = pd.read_csv(path)
     except (FileNotFoundError, pd.errors.EmptyDataError):
@@ -22,6 +22,9 @@ def stock_closed_trades(path) -> pd.DataFrame:
     if trades.empty or "realized_pl" not in trades:
         return pd.DataFrame()
     trades = trades[~trades["symbol"].astype(str).map(is_option_symbol)].copy()
+    if allowed_symbols is not None:
+        allowed = {str(symbol).upper() for symbol in allowed_symbols}
+        trades = trades[trades["symbol"].astype(str).str.upper().isin(allowed)].copy()
     trades["realized_pl"] = pd.to_numeric(trades["realized_pl"], errors="coerce")
     trades["timestamp"] = pd.to_datetime(trades["timestamp"], errors="coerce", utc=True)
     return trades.dropna(subset=["realized_pl", "timestamp"]).sort_values("timestamp")
@@ -38,7 +41,7 @@ class RiskGate:
 
 
 def evaluate_risk_gate(path, settings, now: datetime | None = None) -> RiskGate:
-    trades = stock_closed_trades(path)
+    trades = stock_closed_trades(path, getattr(settings, "universe", None))
     if trades.empty:
         return RiskGate(True, ())
     now = now or datetime.now(timezone.utc)

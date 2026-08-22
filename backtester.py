@@ -335,10 +335,13 @@ def main():
             if not settings.alpaca_paper:
                 parser.error("Paper-log sync is disabled when ALPACA_PAPER is false.")
             from trader import get_trading_client
-            result = sync_from_alpaca(get_trading_client(), logger)
+            result = sync_from_alpaca(
+                get_trading_client(), logger, allowed_symbols=settings.universe
+            )
             print(f"Paper log sync: {result['imported']} imported, {result['updated']} updated, {result['total']} total.")
         report = paper_trade_report(
-            str(logger.path), args.output_dir, starting_capital=settings.max_total_capital
+            str(logger.path), args.output_dir, starting_capital=settings.max_total_capital,
+            allowed_symbols=settings.universe,
         )
         for key, value in report.items(): print(f"{key}: {value}")
     elif not args.start or not args.end:

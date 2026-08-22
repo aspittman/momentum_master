@@ -83,6 +83,38 @@ class PaperTradeTests(unittest.TestCase):
             self.assertEqual(report["total_pl"], 1.0)
             self.assertEqual(report["realized_return_percent"], 0.01)
 
+    def test_shared_account_orders_are_filtered_to_configured_universe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logger = TradeLogger(directory)
+            result = reconcile_filled_orders([
+                order("stock-b", "2026-01-01", "AAPL", "buy", 1, 100),
+                order("stock-s", "2026-01-02", "AAPL", "sell", 1, 110),
+                order("etf-b", "2026-01-01", "XLP", "buy", 1, 80),
+                order("crypto-b", "2026-01-01", "BTC/USD", "buy", 1, 50000),
+            ], logger, allowed_symbols={"AAPL"})
+
+            self.assertEqual(result, {"imported": 2, "updated": 0, "total": 2})
+            self.assertEqual({row["symbol"] for row in logger.read()}, {"AAPL"})
+            report = paper_trade_report(
+                str(logger.path), allowed_symbols={"AAPL"}, starting_capital=1000
+            )
+            self.assertEqual(report["logged_orders"], 2)
+            self.assertEqual(report["total_pl"], 10.0)
+
+    def test_report_excludes_existing_foreign_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logger = TradeLogger(directory)
+            reconcile_filled_orders([
+                order("stock-b", "2026-01-01", "AAPL", "buy", 1, 100),
+                order("stock-s", "2026-01-02", "AAPL", "sell", 1, 110),
+                order("etf-b", "2026-01-01", "XLP", "buy", 1, 80),
+                order("etf-s", "2026-01-02", "XLP", "sell", 1, 70),
+            ], logger)
+
+            report = paper_trade_report(str(logger.path), allowed_symbols={"AAPL"})
+            self.assertEqual(report["logged_orders"], 2)
+            self.assertEqual(report["total_pl"], 10.0)
+
     def test_report_summarizes_execution_quality(self):
         with tempfile.TemporaryDirectory() as directory:
             logger = TradeLogger(directory)

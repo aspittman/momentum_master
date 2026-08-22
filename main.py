@@ -194,7 +194,9 @@ def run_bot() -> None:
     # brief synchronous wait expired.
     from paper_trades import sync_from_alpaca
     from trader import trade_logger
-    result = sync_from_alpaca(get_trading_client(), trade_logger)
+    result = sync_from_alpaca(
+        get_trading_client(), trade_logger, allowed_symbols=settings.universe
+    )
     print(f"Paper trade log reconciled ({result['total']} filled orders).")
     print("Starting MomentumMaster stock momentum bot...")
     while True:

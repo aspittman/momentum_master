@@ -71,7 +71,10 @@ operator review before changing their thresholds. Broker stops reduce risk but
 cannot prevent losses caused by overnight gaps or unavailable markets.
 
 Paper reports exclude option contract symbols reconciled from the same Alpaca
-account and include realized return and realized drawdown. Unrealized P/L still
+account. Broker reconciliation, paper reports, and realized-loss circuit breakers
+are restricted to MomentumMaster's configured `UNIVERSE`, so activity from ETF,
+crypto, and other-symbol bots sharing the account is excluded. Reports include
+realized return and realized drawdown. Unrealized P/L still
 requires current broker positions and is explicitly excluded from the report.
 New orders also record expected versus filled price, adverse slippage in basis
 points and dollars, and fill latency. Positive slippage is adverse for both buys
