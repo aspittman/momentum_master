@@ -39,6 +39,22 @@ class PaperTradeTests(unittest.TestCase):
             self.assertEqual(float(row["qty"]), 3.0)
             self.assertEqual(float(row["exit_price"]), 12.0)
 
+    def test_reconcile_clears_pnl_from_unmatched_duplicate_sell(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logger = TradeLogger(directory)
+            logger.log(symbol="ABC", side="buy", qty=1, entry_price=10, order_id="buy")
+            logger.log(symbol="ABC", side="sell", qty=1, entry_price=10, exit_price=11,
+                       realized_pl=1, realized_pl_percent=.1, order_id="sell-1")
+            logger.log(symbol="ABC", side="sell", qty=1, entry_price=11, exit_price=12,
+                       realized_pl=1, realized_pl_percent=1 / 11, order_id="sell-2")
+
+            reconcile_filled_orders([], logger)
+
+            rows = logger.read()
+            self.assertEqual(float(rows[1]["realized_pl"]), 1.0)
+            self.assertEqual(rows[2]["entry_price"], "")
+            self.assertEqual(rows[2]["realized_pl"], "")
+
     def test_report_keeps_paper_results_separate(self):
         with tempfile.TemporaryDirectory() as directory:
             logger = TradeLogger(directory)

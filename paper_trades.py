@@ -62,6 +62,11 @@ def _apply_fifo_pnl(rows: list[dict[str, Any]]) -> None:
             continue
         if side != "sell":
             continue
+        # Always recompute derived sell fields. An unmatched sell (for example,
+        # an accidental short) must not retain locally estimated long P/L.
+        row["entry_price"] = ""
+        row["realized_pl"] = ""
+        row["realized_pl_percent"] = ""
         remaining, cost = qty, 0.0
         while remaining > 1e-12 and lots[symbol]:
             lot = lots[symbol][0]
@@ -72,7 +77,7 @@ def _apply_fifo_pnl(rows: list[dict[str, Any]]) -> None:
             if lot[0] <= 1e-12:
                 lots[symbol].popleft()
         matched = qty - remaining
-        if matched > 1e-12:
+        if matched > 1e-12 and remaining <= 1e-12:
             average_entry = cost / matched
             row["entry_price"] = average_entry
             row["realized_pl"] = matched * (price - average_entry)

@@ -20,6 +20,12 @@ python launcher.py
 
 `launcher.py` restarts the bot after unexpected crashes. Trades are logged to `logs/trades.csv`, and runtime state is stored under `state/`. Filled stock entries receive a broker-side day stop that is restored or ratcheted as the bot runs. Stop orders reduce intraday risk but cannot guarantee the stop price when a stock gaps through it.
 
+MomentumMaster only manages long positions whose symbols are in its configured
+`UNIVERSE`. Other positions in the same Alpaca account still count toward account
+exposure limits, but the bot will not sell them or attach protective stops to
+them. A single-instance lock also prevents two MomentumMaster processes from
+submitting orders concurrently.
+
 To reconcile the log with Alpaca's filled paper orders and produce a separate
 paper-performance report:
 

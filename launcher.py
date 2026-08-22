@@ -8,6 +8,7 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIGURATION_ERROR_EXIT_CODE = 78
+ALREADY_RUNNING_EXIT_CODE = 73
 
 
 def main() -> None:
@@ -20,6 +21,9 @@ def main() -> None:
             break
         if exit_code == CONFIGURATION_ERROR_EXIT_CODE:
             print("MomentumMaster stopped because configuration is incomplete. Fix .env and run again.")
+            break
+        if exit_code == ALREADY_RUNNING_EXIT_CODE:
+            print("MomentumMaster stopped because another instance is already running.")
             break
         print(f"MomentumMaster crashed with exit code {exit_code}. Restarting in 30 seconds.")
         time.sleep(30)

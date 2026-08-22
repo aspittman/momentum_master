@@ -49,6 +49,19 @@ def is_stock_position(position) -> bool:
     return value == AssetClass.US_EQUITY.value
 
 
+def is_long_position(position) -> bool:
+    side = getattr(position, "side", None)
+    value = str(getattr(side, "value", side)).lower()
+    if value:
+        return value == "long"
+    # Older mocks and broker payloads may omit side. Alpaca reports a signed
+    # quantity in those payloads, so fail closed for zero/negative quantities.
+    try:
+        return float(position.qty) > 0
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 def get_stock_positions() -> list:
     return [position for position in get_trading_client().get_all_positions()
             if is_stock_position(position)]
@@ -69,8 +82,10 @@ def get_open_positions_count() -> int:
 def get_position(symbol: str):
     try:
         return get_trading_client().get_open_position(symbol)
-    except APIError:
-        return None
+    except APIError as exc:
+        if exc.status_code == 404:
+            return None
+        raise
 
 
 def already_holding(symbol: str) -> bool:
@@ -218,6 +233,11 @@ def ensure_protective_stop(symbol: str, qty: float, stop_price: float) -> bool:
             order = get_trading_client().get_order_by_id(order_id)
             status = str(getattr(getattr(order, "status", ""), "value",
                                  getattr(order, "status", ""))).lower()
+            if status == "filled":
+                # Do not replace a filled stop while the positions endpoint may
+                # still be returning the pre-fill position. Reconciliation will
+                # clear state once the position disappears.
+                return True
             if status not in {"canceled", "expired", "rejected", "filled"}:
                 if stop_price > float(existing.get("stop_price", 0)) + 0.009:
                     replacement = get_trading_client().replace_order_by_id(
@@ -306,11 +326,15 @@ def buy_candidate(candidate, notional: float | None = None) -> bool:
         metadata = candidate.as_dict()
         metadata["price"] = fill_price
         bot_state.set_entry(candidate.symbol, fill_price, metadata)
-        ensure_protective_stop(
+        protected = ensure_protective_stop(
             candidate.symbol, float(getattr(order, "filled_qty", 0)),
             max(fill_price * (1 - settings.hard_stop_percent),
                 fill_price - settings.atr_multiplier * candidate.atr),
         )
+        if not protected:
+            raise RuntimeError(
+                f"filled entry for {candidate.symbol} has no verified protective stop"
+            )
     return True
 
 
@@ -337,9 +361,10 @@ def sell_position(symbol: str, qty: float, reason: str, price: float, indicators
         "relative_strength_score": entry.get("relative_strength", ""), "volume_ratio": entry.get("volume_ratio", ""),
         "holding_duration": _holding_duration(entry.get("timestamp")),
     })
+    # Keep the exit marker even when the order filled immediately. Broker
+    # positions can be eventually consistent; reconciliation clears this only
+    # after the position has actually disappeared.
     bot_state.set_pending_exit(symbol, getattr(placed, "id", ""), reason)
-    if getattr(placed, "filled_at", None):
-        mark_recently_sold(symbol)
     return bool(placed)
 
 
@@ -358,6 +383,11 @@ def manage_position(symbol: str, frame) -> bool:
     from signals import momentum_exit_decision
     position = get_position(symbol)
     if position is None:
+        return False
+    if not is_long_position(position):
+        raise RuntimeError(f"{symbol} is not a long position; automatic selling is disabled")
+    if has_pending_exit(symbol):
+        print(f"Exit already submitted for {symbol}; waiting for broker position reconciliation.")
         return False
 
     qty = float(position.qty)

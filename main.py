@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import sys
 import time
 import traceback
@@ -19,6 +20,7 @@ from trader import (
     get_trading_client,
     get_stock_positions,
     is_in_cooldown,
+    is_long_position,
     manage_position,
     print_account_info,
     print_position,
@@ -27,6 +29,22 @@ from trader import (
 
 
 CONFIGURATION_ERROR_EXIT_CODE = 78
+ALREADY_RUNNING_EXIT_CODE = 73
+_instance_lock = None
+
+
+def acquire_instance_lock() -> None:
+    """Prevent two bot processes from trading the same account concurrently."""
+    global _instance_lock
+    lock_path = settings.env_file.parent / settings.state_dir / "bot.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("w")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        raise RuntimeError("another MomentumMaster process is already running")
+    _instance_lock = handle
 
 
 def wait_for_market_open() -> None:
@@ -62,8 +80,26 @@ def manage_open_positions() -> bool:
     sold_this_cycle: set[str] = set()
     positions = get_stock_positions()
     protection_ok = True
-    symbols = {str(position.symbol).upper() for position in positions}
-    reconcile_pending_exits(symbols)
+    configured_symbols = {symbol.upper() for symbol in settings.universe}
+    all_symbols = {str(position.symbol).upper() for position in positions}
+    non_long = [str(position.symbol).upper() for position in positions if not is_long_position(position)]
+    if non_long:
+        protection_ok = False
+        print(f"SAFETY: non-long positions require operator review: {', '.join(sorted(non_long))}")
+    unmanaged = sorted(all_symbols - configured_symbols)
+    if unmanaged:
+        print(
+            "ACCOUNT NOTICE: positions outside this bot's universe will not be managed: "
+            f"{', '.join(unmanaged)}"
+        )
+    symbols = {
+        str(position.symbol).upper()
+        for position in positions
+        if is_long_position(position) and str(position.symbol).upper() in configured_symbols
+    }
+    # Reconcile against every actual account position so an unmanaged holding is
+    # never mistaken for a completed MomentumMaster exit.
+    reconcile_pending_exits(all_symbols)
     for symbol in symbols:
         try:
             if not already_holding(symbol):
@@ -153,15 +189,16 @@ def run_cycle() -> None:
 
 
 def run_bot() -> None:
+    acquire_instance_lock()
     # Recover fills completed while the process was stopped or after an order's
     # brief synchronous wait expired.
     from paper_trades import sync_from_alpaca
     from trader import trade_logger
     result = sync_from_alpaca(get_trading_client(), trade_logger)
     print(f"Paper trade log reconciled ({result['total']} filled orders).")
-    wait_for_market_open()
     print("Starting MomentumMaster stock momentum bot...")
     while True:
+        wait_for_market_open()
         run_cycle()
         time.sleep(settings.scan_interval_seconds)
 
@@ -176,6 +213,14 @@ if __name__ == "__main__":
         except ConfigurationError as exc:
             print(f"\nCONFIGURATION ERROR: {exc}")
             sys.exit(CONFIGURATION_ERROR_EXIT_CODE)
+        except RuntimeError as exc:
+            if str(exc) == "another MomentumMaster process is already running":
+                print(f"\nSAFETY: {exc}.")
+                sys.exit(ALREADY_RUNNING_EXIT_CODE)
+            print("\nBOT CRASHED - restarting soon...")
+            print(f"Crash reason: {exc}")
+            traceback.print_exc()
+            time.sleep(30)
         except Exception as exc:
             print("\nBOT CRASHED - restarting soon...")
             print(f"Crash reason: {exc}")

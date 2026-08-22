@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,8 +29,12 @@ class BotState:
             self.data.update(loaded)
 
     def save(self) -> None:
-        with self.path.open("w") as handle:
+        temporary = self.path.with_suffix(".json.tmp")
+        with temporary.open("w") as handle:
             json.dump(self.data, handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(self.path)
 
     def is_on_cooldown(self, symbol: str, cooldown_seconds: int) -> bool:
         sold_at = self.data["cooldowns"].get(symbol)
