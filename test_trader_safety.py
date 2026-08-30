@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import trader
 import main
@@ -101,6 +101,35 @@ class TraderSafetyTests(unittest.TestCase):
             self.assertTrue(trader.ensure_protective_stop("AAPL", 1, 96.0))
             client.return_value.submit_order.assert_not_called()
             client.return_value.replace_order_by_id.assert_not_called()
+
+    def test_bot_profit_loss_excludes_other_bots_symbols(self):
+        rows = [
+            {"timestamp": "2026-08-20T23:59:59Z", "symbol": "AAPL", "realized_pl": "700"},
+            {"timestamp": "2026-08-21T00:00:00Z", "symbol": "AAPL", "realized_pl": "100"},
+            {"timestamp": "2026-08-22T00:00:00Z", "symbol": "XLP", "realized_pl": "900"},
+        ]
+        positions = [
+            SimpleNamespace(symbol="AAPL", unrealized_pl="25"),
+            SimpleNamespace(symbol="SPY", unrealized_pl="500"),
+        ]
+        configured = SimpleNamespace(universe=["AAPL"], max_total_capital=2500)
+        with patch.object(trader, "settings", configured), \
+             patch.object(trader.trade_logger, "read", return_value=rows):
+            total, gain_loss = trader.bot_profit_loss(positions)
+        self.assertEqual(total, 125.0)
+        self.assertEqual(gain_loss, 0.05)
+
+    def test_account_info_prints_bot_specific_gain_loss(self):
+        client = Mock()
+        client.get_account.return_value = SimpleNamespace(equity="100000", buying_power="50000")
+        client.get_all_positions.return_value = []
+        with patch.object(trader, "get_trading_client", return_value=client), \
+             patch.object(trader, "bot_profit_loss", return_value=(55.5, 0.0222)), \
+             patch("builtins.print") as output:
+            trader.print_account_info()
+        output.assert_any_call(
+            "MomentumMaster Gain/Loss Since Aug 21, 2026: +2.22% (+55.50)"
+        )
 
 
 if __name__ == "__main__":

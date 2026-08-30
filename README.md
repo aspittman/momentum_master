@@ -26,6 +26,11 @@ exposure limits, but the bot will not sell them or attach protective stops to
 them. A single-instance lock also prevents two MomentumMaster processes from
 submitting orders concurrently.
 
+The account summary includes a MomentumMaster-only gain/loss beginning August 21,
+2026, after the shared-account reporting fix. It combines realized P/L since that
+date with unrealized P/L for current positions in its configured universe,
+expressed against `MAX_TOTAL_CAPITAL`.
+
 To reconcile the log with Alpaca's filled paper orders and produce a separate
 paper-performance report:
 

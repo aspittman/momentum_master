@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 
 from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
@@ -15,6 +16,7 @@ from trade_logger import TradeLogger, execution_quality_fields
 trading_client: TradingClient | None = None
 bot_state = BotState(settings.state_dir)
 trade_logger = TradeLogger(settings.log_dir)
+PERFORMANCE_START = datetime(2026, 8, 21, tzinfo=timezone.utc)
 
 
 class ConfigurationError(RuntimeError):
@@ -417,11 +419,51 @@ def manage_position(symbol: str, frame) -> bool:
     return False
 
 
+def bot_profit_loss(positions: list | None = None) -> tuple[float, float]:
+    """Return P/L since the clean-ledger baseline plus current unrealized P/L."""
+    allowed = {symbol.upper() for symbol in settings.universe}
+    realized = 0.0
+    for row in trade_logger.read():
+        if str(row.get("symbol", "")).upper() not in allowed:
+            continue
+        try:
+            timestamp = datetime.fromisoformat(
+                str(row.get("timestamp", "")).replace("Z", "+00:00")
+            )
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            if timestamp < PERFORMANCE_START:
+                continue
+        except (TypeError, ValueError):
+            continue
+        try:
+            realized += float(row.get("realized_pl") or 0)
+        except (TypeError, ValueError):
+            continue
+
+    unrealized = 0.0
+    for position in positions if positions is not None else get_stock_positions():
+        if str(getattr(position, "symbol", "")).upper() not in allowed:
+            continue
+        try:
+            unrealized += float(getattr(position, "unrealized_pl", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+
+    total = realized + unrealized
+    return_percent = total / settings.max_total_capital if settings.max_total_capital > 0 else 0.0
+    return total, return_percent
+
+
 def print_account_info() -> None:
-    account = get_trading_client().get_account()
+    client = get_trading_client()
+    account = client.get_account()
+    positions = [position for position in client.get_all_positions() if is_stock_position(position)]
+    bot_pl, bot_return = bot_profit_loss(positions)
     print("\n===== ACCOUNT INFO =====")
     print(f"Equity: ${account.equity}")
     print(f"Buying Power: ${account.buying_power}")
+    print(f"MomentumMaster Gain/Loss Since Aug 21, 2026: {bot_return:+.2%} ({bot_pl:+.2f})")
     print("========================\n")
 
 
