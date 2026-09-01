@@ -106,6 +106,10 @@ def place_market_order(
     log_fields: dict | None = None,
 ):
     order_side = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
+    # Alpaca accepts stock notional orders in whole cents only. Risk sizing uses
+    # full floating-point precision, so normalize at the broker boundary.
+    if notional is not None:
+        notional = round(float(notional), 2)
     request = MarketOrderRequest(
         symbol=symbol,
         qty=qty,

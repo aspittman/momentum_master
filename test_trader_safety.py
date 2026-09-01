@@ -35,6 +35,18 @@ class TraderSafetyTests(unittest.TestCase):
         self.assertAlmostEqual(buy["slippage_dollars"], 0.20)
         self.assertAlmostEqual(sell["slippage_dollars"], 0.20)
 
+    def test_market_order_notional_is_rounded_to_cents(self):
+        filled = SimpleNamespace(
+            id="buy-1", filled_at="now", filled_avg_price="100",
+            filled_qty="1.2346", submitted_at=None,
+        )
+        with patch.object(trader, "get_trading_client") as client, \
+             patch.object(trader.trade_logger, "log"):
+            client.return_value.submit_order.return_value = filled
+            trader.place_market_order("AAPL", "buy", notional=123.456789)
+        request = client.return_value.submit_order.call_args.args[0]
+        self.assertEqual(request.notional, 123.46)
+
     def test_only_us_equity_positions_are_selected(self):
         positions = [
             SimpleNamespace(symbol="AAPL", asset_class="us_equity"),
