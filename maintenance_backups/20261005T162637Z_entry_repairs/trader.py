@@ -257,24 +257,10 @@ def ensure_protective_stop(symbol: str, qty: float, stop_price: float) -> bool:
         except Exception as exc:
             print(f"Unable to verify protective stop for {symbol}: {exc}; not submitting a duplicate.")
             return False
-    from trading_ownership.guard import OwnershipError
-    request = StopOrderRequest(
+    order = get_trading_client().submit_order(StopOrderRequest(
         symbol=symbol, qty=qty, side=OrderSide.SELL, type=OrderType.STOP,
         time_in_force=TimeInForce.DAY, stop_price=stop_price,
-    )
-    for attempt in range(5):
-        try:
-            order = get_trading_client().submit_order(request)
-            break
-        except OwnershipError as exc:
-            # This precise guard failure occurs before reservation and POST.
-            # Positions and the activity ledger may become visible at different times.
-            # Every retry runs the full ownership checks; no qty tolerance is widened.
-            if str(exc) != f"Position ownership no longer reconciles: {symbol}" or attempt == 4:
-                raise
-            print(f"Waiting for {symbol} fill reconciliation before protecting it ({attempt + 1}/5).")
-            time.sleep(1)
-
+    ))
     bot_state.set_protective_stop(symbol, getattr(order, "id", ""), stop_price)
     print(f"Protective stop active for {symbol} at ${stop_price:.2f}")
     return True

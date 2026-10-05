@@ -5,6 +5,8 @@ import sys
 import time
 import traceback
 
+from requests.exceptions import ConnectionError as RequestsConnectionError, Timeout
+
 from config import settings
 from indicators import add_indicators
 from market_data import download_symbol
@@ -36,6 +38,8 @@ _instance_lock = None
 def acquire_instance_lock() -> None:
     """Prevent two bot processes from trading the same account concurrently."""
     global _instance_lock
+    if _instance_lock is not None:
+        return
     lock_path = settings.env_file.parent / settings.state_dir / "bot.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = lock_path.open("w")
@@ -49,7 +53,13 @@ def acquire_instance_lock() -> None:
 
 def wait_for_market_open() -> None:
     while True:
-        clock = get_trading_client().get_clock()
+        try:
+            clock = get_trading_client().get_clock()
+        except (RequestsConnectionError, Timeout) as exc:
+            print(f"Temporary Alpaca connection error while checking market clock: {exc}")
+            print("Retrying market clock in 15 seconds...")
+            time.sleep(15)
+            continue
         if clock.is_open:
             return
         print(f"Market is closed. Next open: {clock.next_open}")

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+from requests.exceptions import ConnectionError as RequestsConnectionError
 
 import trader
 import main
@@ -10,6 +13,28 @@ from trade_logger import execution_quality_fields
 
 
 class TraderSafetyTests(unittest.TestCase):
+    def test_market_clock_retries_temporary_connection_failure(self):
+        client = Mock()
+        client.get_clock.side_effect = [
+            RequestsConnectionError("temporary disconnect"),
+            SimpleNamespace(is_open=True),
+        ]
+        with patch.object(main, "get_trading_client", return_value=client), \
+             patch.object(main.time, "sleep") as sleep, \
+             patch("builtins.print"):
+            main.wait_for_market_open()
+        sleep.assert_called_once_with(15)
+        self.assertEqual(client.get_clock.call_count, 2)
+
+    def test_instance_lock_is_not_reacquired_during_in_process_restart(self):
+        existing_lock = object()
+        with patch.object(main, "_instance_lock", existing_lock), \
+             patch.object(main, "settings", SimpleNamespace(
+                 env_file=Path("/path/that/must/not/be/opened/.env"), state_dir="state"
+             )):
+            main.acquire_instance_lock()
+            self.assertIs(main._instance_lock, existing_lock)
+
     def test_account_positions_outside_universe_are_not_managed(self):
         positions = [
             SimpleNamespace(symbol="AAPL", side="long", qty="1"),
@@ -113,6 +138,39 @@ class TraderSafetyTests(unittest.TestCase):
             self.assertTrue(trader.ensure_protective_stop("AAPL", 1, 96.0))
             client.return_value.submit_order.assert_not_called()
             client.return_value.replace_order_by_id.assert_not_called()
+
+    def _manage_with_price(self, price):
+        import pandas as pd
+        frame = pd.DataFrame([dict(Close=price, atr=2, ema_fast=90, macd=1, macd_signal=0)] * 2)
+        configured = SimpleNamespace(atr_multiplier=2, hard_stop_percent=.05,
+            data_interval='1d', enable_ema20_exit=False, enable_macd_bearish_exit=False)
+        with patch.object(trader, 'settings', configured), \
+             patch.object(trader, 'get_position', return_value=SimpleNamespace(qty='1', avg_entry_price='100', side='long')), \
+             patch.object(trader, 'has_pending_exit', return_value=False), \
+             patch.object(trader.bot_state, 'update_highest', return_value=100), \
+             patch.object(trader.bot_state, 'update_trailing_stop', return_value=96), \
+             patch.object(trader, 'ensure_protective_stop', return_value=True) as protect, \
+             patch.object(trader, 'sell_position', return_value=True) as sell:
+            result = trader.manage_position('NVDA', frame)
+            return result, protect, sell
+
+    def test_breached_hard_stop_exits_before_installing_invalid_stop(self):
+        result, protect, sell = self._manage_with_price(94)
+        self.assertTrue(result)
+        protect.assert_not_called()
+        self.assertEqual(sell.call_args.args[2], 'hard_stop')
+
+    def test_breached_trailing_stop_exits_before_installing_invalid_stop(self):
+        result, protect, sell = self._manage_with_price(96)
+        self.assertTrue(result)
+        protect.assert_not_called()
+        self.assertEqual(sell.call_args.args[2], 'atr_trailing_stop')
+
+    def test_unbreached_position_keeps_broker_protection(self):
+        result, protect, sell = self._manage_with_price(99)
+        self.assertFalse(result)
+        protect.assert_called_once_with('NVDA', 1, 96)
+        sell.assert_not_called()
 
     def test_bot_profit_loss_excludes_other_bots_symbols(self):
         rows = [
